@@ -67,7 +67,7 @@ minSdk は 23 です。ATAK 5.8.0.9 の公開資料では値が見つからな�
 
 ## CoT の同期と同意（制約）
 
-根拠は ADR 0030 の答え 166・168・171〜173、`docs/distributak/02-functional-spec.md` 6.2、`04-detailed-design.md` 7 章です。グループに入る前に、次の点を利用者が理解して同意することを前提にします。
+根拠は ADR 0030 の答え 166・168・171〜173、`docs/02-functional-spec.md` 6.2、`04-detailed-design.md` 7 章です。グループに入る前に、次の点を利用者が理解して同意することを前提にします。
 
 **送る物**: セッションが確立している間、自分の位置を同じグループの相手へ送ります。自分の ATAK で作った物は、作り方を確かめた種類（送る種類の表）だけを送ります。今の版では表が空なので、作った物は送りません。DistribuTAK の外から ATAK が受けた物、見分けのつかない物、DistribuTAK を起動する前から地図にある物は送りません。
 
@@ -94,6 +94,6 @@ minSdk は 23 です。ATAK 5.8.0.9 の公開資料では値が見つからな�
 
 ## 配布について
 
-組み立てた APK は配布・アップロードせず、S20 と Xperia 1 での確認だけに使います。輸出の扱いと TPP の署名は未確認です。release の署名は扱いません。暗号をアマチュア無線の電波区間へ出しません。
+組み立てた APK は配布・アップロードせず、S20 と Xperia 1 での確認だけに使います。輸出の扱いは未確認です。TPP（tak.gov/user_builds）は使えることを確認済みで、TPC（TAK Product Center）の認証は将来の作業です。release の署名は扱いません。暗号をアマチュア無線の電波区間へ出しません。
 
 ソースのライセンスは親ディレクトリの GPL-3.0 です。同梱する Bouncy Castle・Protocol Buffers・desugar_jdk_libs・ZXing core 3.5.3（Apache-2.0） のライセンス文は `src/main/assets/licenses/` にあります。

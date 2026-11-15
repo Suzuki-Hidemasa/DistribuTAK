@@ -8,9 +8,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class InvitationTest {
     @Test void identityAndUla() {
-        byte[] pub=CryptoTest.hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        // 公開鍵は CryptoTest の ed25519 の試験と同じ（乱数から作った値）。
+        // The public key is the same randomly generated one as in the CryptoTest ed25519 test.
+        byte[] pub=CryptoTest.hex("2ce8cd084440d7a7ca45d179736e8e236fa055fd50d94d0cba46ac9b4cb454d5");
         // Python 標準ライブラリ hashlib.blake2s による独立した照合値。
-        assertArrayEquals(CryptoTest.hex("08fe4a69ab7c0e902c9066fa60a34f6a7864779a3acc9198bddf22688a85dc00"),DeviceIdentity.id(pub));
+        // Cross-check value computed independently with Python hashlib.blake2s.
+        assertArrayEquals(CryptoTest.hex("359742c399f78b7f39bc17222b72d79c25df791705967d5a2248551b034d65ab"),DeviceIdentity.id(pub));
         byte[] address=DeviceIdentity.ula(pub);
         assertEquals((byte)0xfd,address[0]);assertArrayEquals(Arrays.copyOf(DeviceIdentity.id(pub),15),Arrays.copyOfRange(address,1,16));
     }

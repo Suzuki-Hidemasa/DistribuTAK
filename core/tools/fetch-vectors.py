@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import urllib.request
 
-ROOT = Path(__file__).resolve().parents[5]
+ROOT = Path(__file__).resolve().parents[2]
 DEST = ROOT / 'out/distributak/vectors'
 SOURCES = {
     'noise': ('https://raw.githubusercontent.com/mcginty/snow/8ac60f51cfe3e010c84f0a454cc575ad9204fa12/tests/vectors/cacophony.txt', '3bde7c09a6f349ee11c825c50fcc02649f8f02a47c857a459206b357f9386cae'),

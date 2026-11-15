@@ -80,7 +80,7 @@ public class OffloadCapacityTest {
                     .append(" post_gc_jvm_before=").append(retainedBefore).append(" post_gc_jvm_after=").append(retainedAfter).append(" failed=").append(nodes[0].statistics().failed()).append('/').append(nodes[1].statistics().failed()).append(" primary_saves=").append(primary[1].saves)
                     .append(" max_save_ms=").append(primary[1].maxSaveNanos/1e6).append(" peak_sampled_jvm_used=").append(peakHeap).append(" peak_cache_hot_per_node=").append(peakHot)
                     .append(" peak_cache_disk_per_node=").append(peakDisk).append(" peak_cache_files_per_node=").append(peakFiles).append(" peak_cache_refs_per_node=").append(peakRefs).append('\n');
-                Path output=Path.of("../../../../out/reviews/20261112-distributak-cot-sync/offload-capacity-fix2.txt").toAbsolutePath().normalize();Files.createDirectories(output.getParent());Files.write(output,report.toString().getBytes(StandardCharsets.UTF_8));
+                Path output=Path.of("../out/reviews/20261112-distributak-cot-sync/offload-capacity-fix2.txt").toAbsolutePath().normalize();Files.createDirectories(output.getParent());Files.write(output,report.toString().getBytes(StandardCharsets.UTF_8));
                 assertEquals(report.toString(),4096,primary[1].records);assertTrue(report.toString(),seconds<30);
                 for(var node:nodes)assertEquals(0,node.statistics().failed());assertEquals(4096,primary[1].load().records().size());
                 assertTrue(peakHot<=4*1024*1024);assertTrue(peakDisk<=ColdFileStore.DEFAULT_BYTES);assertTrue(peakFiles<=ColdFileStore.DEFAULT_FILES);

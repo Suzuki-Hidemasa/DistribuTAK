@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 plugin_root="$(cd -- "$(dirname -- "$0")" && pwd)"
-project_root="$(cd -- "$plugin_root/../../../.." && pwd)"
+project_root="$(cd -- "$plugin_root/.." && pwd)"
 export JAVA_HOME="${JAVA_HOME:-$HOME/miniconda3/envs/atakdev}"
 export GRADLE_USER_HOME="$project_root/out/distributak/.gradle-home"
 export ANDROID_USER_HOME="$project_root/out/distributak/plugin/.android-home"

@@ -10,7 +10,7 @@ java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
 }
-layout.buildDirectory = file('../../../../out/distributak/build')
+layout.buildDirectory = file('../out/distributak/build')
 dependencies {
     api 'org.bouncycastle:bcprov-jdk18on:1.83'
     implementation 'com.google.protobuf:protobuf-javalite:3.25.5'
@@ -28,7 +28,7 @@ def vectors = tasks.register('fetchVectors', Exec) {
 test {
     dependsOn vectors
     useJUnitPlatform()
-    systemProperty 'distributak.vectors', file('../../../../out/distributak/vectors').absolutePath
+    systemProperty 'distributak.vectors', file('../out/distributak/vectors').absolutePath
 }
 // 手で動かす模擬（JUnit には数えない）。例: ./build.sh sim -PsimArgs="nodes=4096 seed=1" -PsimHeap=2g
 tasks.register('sim', JavaExec) {

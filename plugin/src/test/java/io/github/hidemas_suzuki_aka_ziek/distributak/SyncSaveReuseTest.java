@@ -57,7 +57,7 @@ public class SyncSaveReuseTest {
                 else assertTrue(disk.reads>=2400);
             }
             byte[] plain=primary.loadEncoded();try{assertArrayEquals(node.snapshot().encode(),plain);assertEquals(2400,primary.load().records().size());}finally{Crypto.wipe(plain);}
-            long[] sorted=runs.clone();Arrays.sort(sorted);Path output=Path.of("../../../../out/reviews/20261112-distributak-cot-sync-fix1/save-reuse-"+(optimized?"after":"before")+".txt").toAbsolutePath().normalize();Files.createDirectories(output.getParent());
+            long[] sorted=runs.clone();Arrays.sort(sorted);Path output=Path.of("../out/reviews/20261112-distributak-cot-sync-fix1/save-reuse-"+(optimized?"after":"before")+".txt").toAbsolutePath().normalize();Files.createDirectories(output.getParent());
             Files.write(output,("PC AES-GCM + fsync + atomic rename; records=2400, each XML=1100, XML total=2640000 > Hot=2097152, original envelope="+(original.length+38)+"\nruns_ns="+Arrays.toString(runs)+"\nmedian_ms="+sorted[1]/1e6+" spill_opens_total="+totalReads+" primary_opens_total="+totalOpens+" saves=3\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }finally{if(node!=null)node.close();try(var paths=Files.walk(root)){for(Path path:paths.sorted(Comparator.reverseOrder()).toList())Files.deleteIfExists(path);}}
     }

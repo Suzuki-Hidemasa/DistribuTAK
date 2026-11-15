@@ -75,7 +75,7 @@ class SyncCapacityAnalysisTest {
             }
             report.append("timer_only_250ms_at_30s_received=").append(saved[1].records().size()).append("/4096, sender_failed=").append(nodes[0].statistics().failed()).append(", receiver_failed=").append(nodes[1].statistics().failed()).append('\n');
         } finally {for(var node:nodes)if(node!=null)node.close();}
-        Path path=Path.of("../../../../out/reviews/20261112-distributak-cot-sync/capacity-analysis-fix1.txt").toAbsolutePath().normalize();Files.createDirectories(path.getParent());Files.write(path,report.toString().getBytes(StandardCharsets.UTF_8));
+        Path path=Path.of("../out/reviews/20261112-distributak-cot-sync/capacity-analysis-fix1.txt").toAbsolutePath().normalize();Files.createDirectories(path.getParent());Files.write(path,report.toString().getBytes(StandardCharsets.UTF_8));
     }
     private record Message(int from,int to,byte[] session,byte[] wire){@Override public String toString(){return "Capacity test message";}}
 }

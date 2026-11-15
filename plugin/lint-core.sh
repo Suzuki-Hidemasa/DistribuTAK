@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 plugin_root="$(cd -- "$(dirname -- "$0")" && pwd)"
-project_root="$(cd -- "$plugin_root/../../../.." && pwd)"
+project_root="$(cd -- "$plugin_root/.." && pwd)"
 audit_root="$project_root/out/distributak/core-api-lint"
 export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 if [[ ! -f "$ANDROID_HOME/platforms/android-36/android.jar" ]]; then
@@ -33,7 +33,7 @@ android {
         coreLibraryDesugaringEnabled true
     }
     sourceSets.main.java.srcDirs = [
-        new File(repositoryRoot, 'software/eud/distributak/core/src/main/java'),
+        new File(repositoryRoot, 'core/src/main/java'),
         new File(repositoryRoot, 'out/distributak/build/generated/source/proto/main/java')
     ]
     lint {
