@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-only
+syntax = "proto3";
+package distributak.core;
+option java_package = "io.github.hidemas_suzuki_aka_ziek.distributak.core.proto";
+option java_outer_classname = "RenewalSchema";
+
+message CertificateRenewal { bytes certificate = 1; }

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<plugin><extension type="gov.tak.api.plugin.IPlugin"
+    impl="io.github.hidemas_suzuki_aka_ziek.distributak.DistribuTakPlugin" singleton="true" /></plugin>

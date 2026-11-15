@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <application android:label="DistribuTAK" android:allowBackup="false"
+        android:icon="@drawable/distributak_icon"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <meta-data android:name="plugin-api" android:value="${distributakPluginApi}" />
+        <meta-data android:name="app_desc" android:value="Wi-Fi LAN の試験" />
+        <activity android:name="com.atakmap.app.component" android:exported="true"
+            tools:ignore="MissingClass">
+            <intent-filter><action android:name="com.atakmap.app.component" /></intent-filter>
+        </activity>
+    </application>
+</manifest>

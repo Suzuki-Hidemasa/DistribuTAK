@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-3.0-only
+syntax = "proto3";
+package distributak.core;
+option java_package = "io.github.hidemas_suzuki_aka_ziek.distributak.core.proto";
+option java_outer_classname = "InvitationSchema";
+
+// 第1段の提案。番地はネットワーク順の IPv4 4 バイトまたは IPv6 16 バイト。
+message Invitation {
+  bytes admin_address = 1;
+  uint32 udp_port = 2;
+  bytes handshake_public_key = 3;
+  bytes admin_public_key = 4;
+  bytes totp_secret = 5;
+  bytes group_id = 6;
+}

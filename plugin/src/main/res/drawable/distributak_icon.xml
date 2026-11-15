@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- 利用者が用意した tak-distributed-white.svg を写したもの。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="32dp" android:height="32dp" android:viewportWidth="64" android:viewportHeight="64">
+    <path android:name="peer-links" android:fillColor="#FFFFFF" android:fillType="evenOdd"
+        android:pathData="M32 5.171573 58.828427 32 32 58.828427 5.171573 32Z M32 10.828427 10.828427 32 32 53.171573 53.171573 32Z" />
+    <path android:name="peer-nodes" android:fillColor="#FFFFFF"
+        android:pathData="M29 3H35L37 5V11L35 13H29L27 11V5Z M53 27H59L61 29V35L59 37H53L51 35V29Z M29 51H35L37 53V59L35 61H29L27 59V53Z M5 27H11L13 29V35L11 37H5L3 35V29Z" />
+    <path android:name="navigation-marker" android:fillColor="#FFFFFF"
+        android:pathData="M32 18 22 40 32 35 42 40Z" />
+</vector>

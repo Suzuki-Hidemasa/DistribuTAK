@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-3.0-only
+buildscript {
+    def local = new Properties()
+    if (file('local.properties').exists()) file('local.properties').withInputStream { local.load(it) }
+    def value = { key -> project.findProperty(key) ?: local.getProperty(key) }
+    ext.ATAK_VERSION = '5.8.0'
+    ext.takrepoUrl = 'https://repo.maven.apache.org/maven2'
+    ext.takrepoUser = ''
+    ext.takrepoPassword = ''
+    ext.isDevKitEnabled = { false }
+    repositories { google(); mavenCentral() }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.0'
+        def jar = value('distributak.takdev.jar')
+        if (!jar || !file(jar).isFile() || !new File(jar).isAbsolute()) {
+            throw new GradleException('distributak.takdev.jar に jar の絶対パスを指定してください')
+        }
+        classpath files(jar)
+    }
+}
+layout.buildDirectory = file('../../../../out/distributak/plugin/build')
+apply plugin: 'com.android.application'
+apply plugin: 'atak-takdev-plugin'
+repositories { google(); mavenCentral() }
+
+def local = new Properties()
+if (file('local.properties').exists()) file('local.properties').withInputStream { local.load(it) }
+def value = { key -> project.findProperty(key) ?: local.getProperty(key) }
+def sdkJar = value('distributak.sdk.jar')
+if (!sdkJar || !file(sdkJar).isFile() || !new File(sdkJar).isAbsolute()) {
+    throw new GradleException('distributak.sdk.jar に jar の絶対パスを指定してください')
+}
+android {
+    namespace 'io.github.hidemas_suzuki_aka_ziek.distributak'
+    compileSdk 36
+    buildFeatures { buildConfig true }
+    defaultConfig {
+        applicationId 'io.github.hidemas_suzuki_aka_ziek.distributak'
+        // ADR 0030 答え132。公開資料に値がなく、OS の情報で23と確認した決定。
+        minSdk 23
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0'
+        manifestPlaceholders = [distributakPluginApi: 'com.atakmap.app@5.8.0.CIV']
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
+    }
+    buildTypes { debug { minifyEnabled false; matchingFallbacks = ['sdk'] } }
+    flavorDimensions += 'application'
+    productFlavors { civ { dimension 'application'; isDefault = true } }
+    bundle { storeArchive { enable = false } }
+    lint { checkDependencies true }
+}
+androidComponents { beforeVariants(selector().withBuildType('release')) { it.enable = false } }
+dependencies {
+    compileOnly files(sdkJar)
+    implementation 'io.github.hidemas_suzuki_aka_ziek.distributak:distributak-core:0.1.0'
+    implementation 'com.google.zxing:core:3.5.3'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+    testImplementation 'junit:junit:4.13.2'
+}

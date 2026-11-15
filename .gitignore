@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# ビルドの出力・手元の設定・署名の鍵は入れない
+out/
+build/
+.gradle/
+.takdev/
+local.properties
+.ruff_cache/
+__pycache__/
+*.apk
+*.aab
+*.jks
+*.keystore
+*.p12

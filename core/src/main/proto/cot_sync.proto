@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-3.0-only
+syntax = "proto3";
+package distributak.core;
+import "renewal.proto";
+option java_package = "io.github.hidemas_suzuki_aka_ziek.distributak.core.proto";
+option java_outer_classname = "SyncSchema";
+
+// ADR 0030 答え168。XMLはUTF-8の元のバイト列を運ぶ。
+message SyncVersion { uint64 wall_millis = 1; bytes eud_id = 2; }
+message SyncRecord {
+  string uid = 1; SyncVersion version = 2; bytes hash = 3;
+  uint32 hop = 4; uint64 stale_millis = 5; bytes xml_utf8 = 6;
+}
+message SyncTombstone { string uid = 1; SyncVersion version = 2; bytes hash = 3; uint32 hop = 4; }
+message SyncAck { string uid = 1; SyncVersion version = 2; bytes hash = 3; bool deleted = 4; }
+message SyncInventoryEntry { string uid = 1; SyncVersion version = 2; bytes hash = 3; bool deleted = 4; }
+message SyncInventory { bytes snapshot_id = 1; uint32 page = 2; bool last = 3; repeated SyncInventoryEntry entries = 4; }
+message SyncRequest { bytes snapshot_id = 1; uint32 page = 2; repeated SyncInventoryEntry wanted = 3; }
+message SyncFragment {
+  bytes transfer_id = 1; bytes digest = 2; uint32 total_bytes = 3;
+  uint32 index = 4; uint32 count = 5; bytes payload = 6;
+}
+message SyncEnvelope {
+  uint32 schema = 1;
+  oneof body {
+    SyncRecord record = 2; SyncTombstone tombstone = 3; SyncAck ack = 4;
+    SyncInventory inventory = 5; SyncRequest request = 6; SyncFragment fragment = 7;
+    CertificateRenewal renewal = 8;
+    // 項目9はグループの DHT（第12段 核 C2）。schema は 2 で、CoT・更新・記録（項目 2〜8）とは載せ合わない。
+    DhtEnvelope dht = 9;
+    ManagementEnvelope management = 10;
+  }
+}
+
+// グループの DHT（ADR 0030 答え 181。核 C2）。同じグループの認証済み端末だけが DATA の中で交わす。
+enum DhtOperation {
+  DHT_OPERATION_UNSPECIFIED = 0; DHT_PING = 1; DHT_PONG = 2; DHT_FIND_NODE = 3; DHT_NODES = 4;
+  DHT_FIND_VALUE = 5; DHT_VALUE = 6; DHT_STORE = 7; DHT_STORE_RESULT = 8; DHT_TRANSFER = 9; DHT_TRANSFER_ACK = 10;
+}
+enum DhtStoreStatus {
+  DHT_STORE_STATUS_UNSPECIFIED = 0; DHT_STORE_ACCEPTED = 1; DHT_STORE_DUPLICATE = 2; DHT_STORE_OLD = 3;
+  DHT_STORE_INVALID = 4; DHT_STORE_FULL = 5; DHT_STORE_UNSUPPORTED = 6;
+}
+enum DhtTransferKind { DHT_TRANSFER_KIND_UNSPECIFIED = 0; DHT_TRANSFER_STORE = 1; DHT_TRANSFER_VALUE = 2; }
+message DhtPing {}
+message DhtPong {}
+message DhtFindNode { bytes target = 1; uint32 page = 2; }
+message DhtNodeContact { bytes node_id = 1; bytes handshake_key = 2; bytes ipv4 = 3; uint32 port = 4; }
+message DhtNodes { bytes target = 1; uint32 page = 2; bool last = 3; repeated DhtNodeContact contacts = 4; }
+message DhtFindValue { bytes key = 1; }
+message DhtValue { bytes key = 1; bytes signed_record = 2; }
+message DhtStore { bytes key = 1; bytes signed_record = 2; }
+message DhtStoreResult { bytes key = 1; DhtStoreStatus status = 2; }
+message DhtTransfer {
+  DhtTransferKind operation = 1; bytes transfer_id = 2; bytes digest = 3;
+  uint32 total_bytes = 4; uint32 index = 5; uint32 count = 6; bytes piece = 7;
+}
+message DhtTransferAck { bytes transfer_id = 1; bytes digest = 2; uint32 count = 3; bytes received = 4; }
+message DhtEnvelope {
+  uint32 schema = 1; bytes group_id = 2; bytes request_id = 3; DhtOperation operation = 4;
+  oneof body {
+    DhtPing ping = 5; DhtPong pong = 6; DhtFindNode find_node = 7; DhtNodes nodes = 8;
+    DhtFindValue find_value = 9; DhtValue value = 10; DhtStore store = 11; DhtStoreResult store_result = 12;
+    DhtTransfer transfer = 13; DhtTransferAck transfer_ack = 14;
+  }
+}
+
+// 暗号で包む平文。group/local/purposeで別用途・別グループとの取り違えを断る。
+message SyncStoredRecord { SyncEnvelope envelope = 1; uint64 tombstone_until = 2; }
+message SyncOrigin { string uid = 1; uint32 kind = 2; }
+message SyncSnapshot {
+  string purpose = 1; bytes group_id = 2; bytes local_id = 3;
+  uint64 maximum = 4; bool has_maximum = 5;
+  repeated SyncStoredRecord records = 6; repeated SyncOrigin origins = 7;
+}
+
+// schema3 の専用管理入口。6 は予約し、製品で受ける操作は受信側で選ぶ。
+message ManagementEnvelope {
+  uint32 schema = 1;
+  reserved 6;
+  oneof body { AdminControl admin_control = 8; ProofCertificateRenewal certificate_renewal = 9; }
+}
+message ProofCertificateRenewal {
+  uint32 schema = 1; uint32 operation = 2; bytes group_id = 3; bytes request_id = 4;
+  bytes member_id = 5; bytes administrator_key = 6; bytes base_certificate_digest = 7;
+  bytes handshake_key = 8; uint32 reason = 9; bytes management_operation_id = 10;
+  uint32 proof_format = 11; bytes identity_key = 12; bytes identity_proof = 13; bytes signed_certificate = 14;
+}
+
+message AdminControl {
+  uint32 schema=1; bytes group_id=2; bytes request_id=3; uint32 operation=4;
+  bytes member_id=5; bytes admin_key=6; uint64 base_admin_version=7;
+  bytes identity_signature=8; bytes possession_signature=9; bytes identity_key=10;
+}

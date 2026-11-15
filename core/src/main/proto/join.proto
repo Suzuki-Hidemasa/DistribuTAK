@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: GPL-3.0-only
+syntax = "proto3";
+package distributak.core;
+option java_package = "io.github.hidemas_suzuki_aka_ziek.distributak.core.proto";
+option java_outer_classname = "JoinSchema";
+
+// 番号順・最短の整数・全単一項目を明示する。生成した型は送る形には使わない。
+message JoinRequest {
+  uint32 kind = 1; // 1
+  bytes invitation_id = 2;
+  bytes identity_key = 3;
+  bytes handshake_key = 4;
+  bytes identity_signature = 5;
+  bytes totp = 6; // ASCII 8 桁
+  bytes proof = 7; // 項目1〜6のバイト列のHMAC-SHA256
+  bytes request_signature = 8; // 用途の前置きと項目1〜7の受けたバイト列へのEd25519署名
+}
+message JoinResponse {
+  uint32 kind = 1; // 2
+  bytes group_id = 2;
+  repeated bytes administrators = 3; // 起点から版の順。各値はSignedRecord。
+  bytes anchor_signature = 4;
+  bytes revocations = 5;
+  bytes certificate = 6;
+  bytes wrapped_key = 7;
+}
+message JoinPacket {
+  uint32 kind = 1; // 求め3、返事4
+  bytes invitation_id = 2;
+  bytes enc = 3;
+  bytes ciphertext = 4;
+  bytes signature = 5; // 返事だけ。求めではこの項目を書かない。
+}
