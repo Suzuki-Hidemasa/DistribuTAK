@@ -94,6 +94,6 @@ minSdk は 23 です。ATAK 5.8.0.9 の公開資料では値が見つからな�
 
 ## 配布について
 
-組み立てた APK は配布・アップロードせず、S20 と Xperia 1 での確認だけに使います。輸出の扱いと TPP の署名は未確認です。release の署名は扱いません。暗号をアマチュア無線の電波区間へ出しません。
+組み立てた APK は配布・アップロードせず、S20 と Xperia 1 での確認だけに使います。輸出の扱いは未確認です。TPP（tak.gov/user_builds）は使えることを確認済みで、TPC（TAK Product Center）の認証は将来の作業です。release の署名は扱いません。暗号をアマチュア無線の電波区間へ出しません。
 
 ソースのライセンスは親ディレクトリの GPL-3.0 です。同梱する Bouncy Castle・Protocol Buffers・desugar_jdk_libs・ZXing core 3.5.3（Apache-2.0） のライセンス文は `src/main/assets/licenses/` にあります。

@@ -4,6 +4,7 @@ title: エージェントの設定の運用確認（フック登録・コメン�
 status: To Do
 assignee: []
 created_date: '2026-11-15 22:55'
+updated_date: '2026-11-15 23:04'
 labels:
   - agents
 dependencies: []
@@ -18,7 +19,13 @@ ordinal: 6000
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 フックの登録の有無が決まり、CLAUDE.md に反映された
-- [ ] #2 コメントの言語の方針が決まり、CLAUDE.md に反映された
+- [x] #1 フックの登録の有無が決まり、CLAUDE.md に反映された
+- [x] #2 コメントの言語の方針が決まり、CLAUDE.md に反映された
 - [ ] #3 作業者を1回起動して動作を確かめた
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-16 利用者の決定: (1) 書き換えを止めるフックは登録しない。CLAUDE.md に反映。(2) コードのコメントは JTAK のように日本語と英語の両方で書く（日本語が先）。CLAUDE.md・AGENTS.md・distributak-worker のスキルに反映。新しく書く・直すコードから適用し、既存のコメントの一斉の直しは利用者が頼んだときだけ行う。(3) 作業者の初回起動は未了。
+<!-- SECTION:NOTES:END -->

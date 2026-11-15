@@ -12,26 +12,35 @@ class CryptoTest {
         // Python hashlib.blake2s(b'', digest_size=16) とも照合する。
         assertArrayEquals(hex("64550d6ffe2c0a01a14aba1eade0200c"), Crypto.blake2s128(new byte[0]));
     }
-    @Test void x25519Rfc7748() {
-        byte[] secret = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
-        assertArrayEquals(hex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"), Crypto.x25519Public(secret));
+    // 以下の x25519・ed25519・hkdf の値は、このプロジェクトで乱数から作り、
+    // Python の cryptography・hmac・hashlib（独立した実装）で計算した。RFC の例の値は使わない。
+    // The x25519, ed25519 and hkdf values below were generated randomly for this project and
+    // computed with Python cryptography / hmac / hashlib (independent implementations). No RFC example values are used.
+    @Test void x25519PublicKey() {
+        byte[] secret = hex("5b3b25c4303cc06a9f4fad00adc0c3e8537f461ef751579d1416d1e205ef8d95");
+        assertArrayEquals(hex("42800ea35307e11b2a92430e5601b4e113bbfb53b1dfefd86cc2ac0ade0cc010"), Crypto.x25519Public(secret));
         assertThrows(SecurityException.class, () -> Crypto.x25519(secret, new byte[32]));
     }
-    @Test void ed25519Rfc8032() {
-        byte[] secret = hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
-        byte[] pub = hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
-        byte[] sig = hex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
+    @Test void ed25519SignAndVerify() {
+        byte[] secret = hex("8f49ef94c601c44af5759f808a56a381bb299059e4fb0c41af588a536bc72d07");
+        byte[] pub = hex("2ce8cd084440d7a7ca45d179736e8e236fa055fd50d94d0cba46ac9b4cb454d5");
+        byte[] sig = hex("6113e31f7b09ee7e821a85e86d306c3581c57d2dec54d7507da11c26442733c8afff5f9dc5ca7cd7e37c8df340b75f7a59b1d81cccfb554593e536d96b1c860e");
+        byte[] message = hex("646973747269627574616b2d746573742d6d6573736167652d31");
+        byte[] messageSig = hex("9b7547771cc2e97b4c4aec57bbb9801540315c134f473a3864502bd7da1f3d5e93ab93cdffb4a0705586ff347856e5e06e333d61af5b3d41fb3369889e71e000");
         assertArrayEquals(pub, Crypto.ed25519Public(secret));
         assertArrayEquals(sig, Crypto.sign(secret, new byte[0]));
+        assertArrayEquals(messageSig, Crypto.sign(secret, message));
         assertTrue(Crypto.verify(pub, new byte[0], sig));
+        assertTrue(Crypto.verify(pub, message, messageSig));
+        assertFalse(Crypto.verify(pub, message, sig));
         sig[0] ^= 1;
         assertFalse(Crypto.verify(pub, new byte[0], sig));
     }
-    @Test void hkdfRfc5869() {
-        byte[] ikm = new byte[22]; java.util.Arrays.fill(ikm, (byte) 0x0b);
-        byte[] prk = Crypto.extract(hex("000102030405060708090a0b0c"), ikm);
-        assertArrayEquals(hex("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5"), prk);
-        assertArrayEquals(hex("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"), Crypto.expand(prk, hex("f0f1f2f3f4f5f6f7f8f9"), 42));
+    @Test void hkdfSha256() {
+        byte[] ikm = hex("9e4cad06010207be7b87fc12033fe833aa0782d7350ef6a524660d08d35924af");
+        byte[] prk = Crypto.extract(hex("e08d4e238cc07ee507142cd9959adc25"), ikm);
+        assertArrayEquals(hex("a0062654cad9f87e6f6f3184f18ec1cf6d2aedeb4a4bfdc87d505251f405cd8e"), prk);
+        assertArrayEquals(hex("a25b11419fa9e9a8b2bad2bf8717931c840847a27aef5a8c600ff0902f3b6dbb8bf53da589281bde361b"), Crypto.expand(prk, hex("ef7a28ac75cac7e12af115f6"), 42));
     }
     @Test void aeadRejectsTamperingAndWipe() {
         for (boolean aes : new boolean[]{false,true}) {
