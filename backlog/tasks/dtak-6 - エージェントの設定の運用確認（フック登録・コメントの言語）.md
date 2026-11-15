@@ -4,7 +4,7 @@ title: エージェントの設定の運用確認（フック登録・コメン�
 status: To Do
 assignee: []
 created_date: '2026-11-15 22:55'
-updated_date: '2026-11-15 23:04'
+updated_date: '2026-11-15 23:08'
 labels:
   - agents
 dependencies: []
@@ -28,4 +28,6 @@ ordinal: 6000
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-16 利用者の決定: (1) 書き換えを止めるフックは登録しない。CLAUDE.md に反映。(2) コードのコメントは JTAK のように日本語と英語の両方で書く（日本語が先）。CLAUDE.md・AGENTS.md・distributak-worker のスキルに反映。新しく書く・直すコードから適用し、既存のコメントの一斉の直しは利用者が頼んだときだけ行う。(3) 作業者の初回起動は未了。
+
+2026-11-16: AC #3 は未完了。バックグラウンドのセッションは tmux の外で動くため、spawn-agent.sh worker が「tmux の中で動かしていない」で止まった（--dry-run は成功）。利用者の tmux のペインへ送り込むことはしなかった。利用者が tmux のペインの中から 'tools/agents/spawn-agent.sh worker --project <ワークツリー> --goal <読むだけの目標>' を 1 回実行して、起動と /goal の設定を確かめる。
 <!-- SECTION:NOTES:END -->
