@@ -12,3 +12,6 @@ __pycache__/
 *.jks
 *.keystore
 *.p12
+# Claude Code の手元の設定と作業ツリー
+.claude/settings.local.json
+.claude/worktrees/

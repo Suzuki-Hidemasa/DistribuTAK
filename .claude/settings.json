@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(ls:*)",
+      "Bash(bash tools/agents/send-file.sh:*)",
+      "Bash(bash tools/agents/wait-msg.sh:*)",
+      "Bash(bash tools/agents/ask.sh:*)",
+      "Bash(bash tools/agents/nudge.sh:*)",
+      "Bash(bash tools/agents/despawn-agent.sh:*)",
+      "Bash(backlog task list:*)",
+      "Bash(backlog task view:*)",
+      "Bash(backlog search:*)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(rm -rf /:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/*.key)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.jks)",
+      "Read(./**/*.keystore)",
+      "Read(./**/secrets/**)",
+      "Read(./plugin/local.properties)"
+    ]
+  }
+}

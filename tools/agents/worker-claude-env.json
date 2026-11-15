@@ -1,0 +1,5 @@
+{
+  "env": {
+    "DISTRIBUTAK_ALLOW_CODE_EDIT": "1"
+  }
+}
