@@ -1,10 +1,10 @@
 # DistribuTAK の設計書
 
-DistribuTAK は、ATAK のプラグインです。同じ鍵グループの EUD（Android の端末）どうしが、LAN・WAN・モバイル回線の上で CoT を同期し、各 EUD が分散型の TAK サーバーの役を持ちます。本機（PRC-163 風機）が無くても動きます。根拠は ADR 0030（`../decisions/0030-device-as-lan-router.md`）です。
+DistribuTAK は、ATAK のプラグインです。同じ鍵グループの EUD（Android の端末）どうしが、LAN・WAN・モバイル回線の上で CoT を同期し、各 EUD が分散型の TAK サーバーの役を持ちます。本機（PRC-163 風機）が無くても動きます。根拠は ADR 0030（`PRC-163:docs/decisions/0030-device-as-lan-router.md`）です。
 
 本機の操作（ext-link）と、本機の無線で送る CoT（LoRa のように IP を通さない経路の分）は、別のプラグイン RadioLink が受け持ちます（ADR 0030 の答え 10・39・40）。RadioLink の設計は、この文書の組に入れません。
 
-この文書の組を `docs/distributak/` に置くことは、2026-11-11 に利用者が決めました（ADR 0030 の答え 49）。
+この文書の組は、もとは PRC-163 の `docs/distributak/` に置いていました（2026-11-11 に利用者が決めた。ADR 0030 の答え 49）。2026-11-16 に、このリポジトリの `docs/` へ分けました。
 
 ## 1. 文書の組
 
@@ -31,11 +31,11 @@ ADR 0030 の本文は、答えのほうも「決定 N」と書いています（
 
 | DistribuTAK | 本機の文書 | 関係 |
 |---|---|---|
-| `01-requirements.md` | `../requirements.md` | DistribuTAK の要件は本機の要件と別に立てる。本機の要件のうち DistribuTAK に関わるもの（FR-DATA-03・FR-IF-04 など）は、下の 5 章の影響の表で直す |
-| `02-functional-spec.md` | `../functional-spec/`（F06・F07・F10・F11 など） | 本機の機能仕様に DistribuTAK の節は作らない。本機の側から関わるところは 5 章の表で直す |
-| `03-basic-design.md` | `../basic-design/`（02・03・05） | 本機の `datad` の D6 は、サーバーの役を持たない（答え 8） |
-| `04-detailed-design.md` | `../detailed-design/`（06-apu-software 12.7 など） | 同上 |
-| — | `../interfaces/ext-link.md`・`ext-link.proto` | RadioLink が使う。DistribuTAK は使わない（答え 10） |
+| `01-requirements.md` | `PRC-163:docs/requirements.md` | DistribuTAK の要件は本機の要件と別に立てる。本機の要件のうち DistribuTAK に関わるもの（FR-DATA-03・FR-IF-04 など）は、下の 5 章の影響の表で直す |
+| `02-functional-spec.md` | `PRC-163:docs/functional-spec/`（F06・F07・F10・F11 など） | 本機の機能仕様に DistribuTAK の節は作らない。本機の側から関わるところは 5 章の表で直す |
+| `03-basic-design.md` | `PRC-163:docs/basic-design/`（02・03・05） | 本機の `datad` の D6 は、サーバーの役を持たない（答え 8） |
+| `04-detailed-design.md` | `PRC-163:docs/detailed-design/`（06-apu-software 12.7 など） | 同上 |
+| — | `PRC-163:docs/interfaces/ext-link.md`・`ext-link.proto` | RadioLink が使う。DistribuTAK は使わない（答え 10） |
 
 ## 4. 守ること
 
@@ -79,7 +79,7 @@ ADR 0030 の「影響」の表（13 行）を 1 行ずつ処理し、直した�
 
 ## 6. 確かめること
 
-決まっていないことは推測で埋めません。利用者に確かめ、答えを先に ADR 0030（答え 50 から）に書いてから、この文書の組に使います。法令に関わるものは `../legal.md` の要確認事項にも書きます。
+決まっていないことは推測で埋めません。利用者に確かめ、答えを先に ADR 0030（答え 50 から）に書いてから、この文書の組に使います。法令に関わるものは `PRC-163:docs/legal.md` の要確認事項にも書きます。
 
 ### 6.1 まだ決まっていないこと
 
@@ -127,7 +127,7 @@ ADR 0030 の「影響」の表（13 行）を 1 行ずつ処理し、直した�
 
 - パッケージ名は `io.github.hidemas_suzuki_aka_ziek.distributak`（答え 76。DT-CN-05）。
 - Android の API の下限は、使う版の ATAK の下限と同じ。値は作るときに確かめる（答え 77）。
-- Noise の試験のベクトルは、Noise の実装（cacophony、snow など）が公開しているものを使う。出どころは作るときに `../references.md` に書く（答え 78）。
+- Noise の試験のベクトルは、Noise の実装（cacophony、snow など）が公開しているものを使う。出どころは作るときに `PRC-163:docs/references.md` に書く（答え 78）。
 - 管理者の鍵の写しの QR コードは、出してから 60 秒で自動で消す（答え 79）。
 - 「消去」では、鍵のほかに、プラグインが持つもの全部を消す。ATAK の地図の CoT は ATAK の操作で消す（答え 80）。
 - 失効・新しい鍵・期限切れのときはセッションをすぐに閉じる。グループの鍵を作り直したら握手し直す（答え 81）。

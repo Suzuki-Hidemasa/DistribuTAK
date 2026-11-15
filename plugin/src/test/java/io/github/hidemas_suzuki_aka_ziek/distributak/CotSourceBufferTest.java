@@ -29,7 +29,7 @@ public class CotSourceBufferTest {
         try(var batch=buffer.take()){
             assertEquals(65536,batch.external.size());for(int n=65536;n<131072;n++)assertTrue(buffer.external(String.format(java.util.Locale.ROOT,"%06d",n)+"x".repeat(250)));
             assertFalse(buffer.external("overflow"));System.gc();long after=Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory();
-            var path=java.nio.file.Path.of("../../../../out/reviews/20261112-distributak-cot-sync-fix1/source-buffer-memory-fix2.txt").toAbsolutePath().normalize();java.nio.file.Files.createDirectories(path.getParent());
+            var path=java.nio.file.Path.of("../out/reviews/20261112-distributak-cot-sync-fix1/source-buffer-memory-fix2.txt").toAbsolutePath().normalize();java.nio.file.Files.createDirectories(path.getParent());
             java.nio.file.Files.write(path,("PC fixture UID UTF8=256; pending=65536, in_flight=65536; fingerprints shared on take, no UID strings or set copy retained\npost_gc_before="+before+" post_gc_after="+after+" delta="+(after-before)+"\nConservative live accounting with 64-bit uncompressed references: two sets <= 16 MiB; compressed-reference estimate ~10 MiB, plus latest XML <=64KiB. Android not measured.\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }buffer.clear();
     }

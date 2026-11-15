@@ -1,6 +1,6 @@
 # DistribuTAK の基本設計
 
-DistribuTAK のプラグインの中の構成と、データの流れ、番地、本機・RadioLink との境目、試験の条件を書きます。機能は `02-functional-spec.md`、要件は `01-requirements.md` にあります。根拠は ADR 0030（`../decisions/0030-device-as-lan-router.md`）の答え 1〜107 です。
+DistribuTAK のプラグインの中の構成と、データの流れ、番地、本機・RadioLink との境目、試験の条件を書きます。機能は `02-functional-spec.md`、要件は `01-requirements.md` にあります。根拠は ADR 0030（`PRC-163:docs/decisions/0030-device-as-lan-router.md`）の答え 1〜107 です。
 
 ADR 0030 で決まっていない点は「要確認」と書き、推測では埋めません。
 
@@ -123,7 +123,7 @@ DistribuTAK は仮想の網の番地で相手を区別するので、Wi-Fi の L
 | SA の間隔 | ATAK の既定 |
 | 回線 | LAN とモバイル回線 |
 | 測るもの | 1 時間のデータ量と電池の減り |
-| 本機の経路の音声の優先と送信時間 | 今の `../detailed-design/06-apu-software.md` 10.5 の数え方のまま |
+| 本機の経路の音声の優先と送信時間 | 今の `PRC-163:docs/detailed-design/06-apu-software.md` 10.5 の数え方のまま |
 | ホップ数の上限 | 16（答え 55。仮の値） |
 
 - 65536 台のグループで動くこと（答え 48・57。DT-NF-02）は、模擬の試験で確かめる。PC の上でプラグインの DHT と同期の部品をたくさん動かし、負荷と届くまでの時間を測る。実機の試験は数台で行う（答え 91）。

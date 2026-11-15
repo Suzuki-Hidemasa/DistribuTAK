@@ -25,7 +25,7 @@ public class SyncPersistenceTimingTest {
                 if(run>=0)elapsed[run]=duration;assertEquals(4194304,Files.size(base));assertArrayEquals(new byte[4194266],envelope.open(Files.readAllBytes(base)));
             }
             long[] sorted=elapsed.clone();Arrays.sort(sorted);
-            Path output=Path.of("../../../../out/reviews/20261112-distributak-cot-sync/persistence-benchmark-fix1.txt").toAbsolutePath().normalize();Files.createDirectories(output.getParent());
+            Path output=Path.of("../out/reviews/20261112-distributak-cot-sync/persistence-benchmark-fix1.txt").toAbsolutePath().normalize();Files.createDirectories(output.getParent());
             Files.write(output,("PC only; AES-256-GCM + atomic file write + file fsync + rename; envelope bytes=4194304; warmup=1\n"
                 +"runs_ns="+Arrays.toString(elapsed)+"\nmedian_ms="+sorted[2]/1_000_000.0+"\nmax_ms="+sorted[4]/1_000_000.0+"\nAndroid Keystore/storage timing is unmeasured.\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } finally {Files.deleteIfExists(next);Files.deleteIfExists(base);Files.deleteIfExists(dir);}

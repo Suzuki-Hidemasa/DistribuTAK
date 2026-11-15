@@ -1,8 +1,8 @@
 # DistribuTAK の要件
 
-DistribuTAK（ATAK のプラグイン）の要件です。根拠は ADR 0030（`../decisions/0030-device-as-lan-router.md`）の答え 1〜107 です。番号の引き方は `README.md` の 2 章のとおりで、「答え N」は ADR 0030 の「未決への利用者の答え」の N 番を指します。
+DistribuTAK（ATAK のプラグイン）の要件です。根拠は ADR 0030（`PRC-163:docs/decisions/0030-device-as-lan-router.md`）の答え 1〜107 です。番号の引き方は `README.md` の 2 章のとおりで、「答え N」は ADR 0030 の「未決への利用者の答え」の N 番を指します。
 
-要件の ID は `DT-` で始めます。本機（PRC-163 風機）の要件（`../requirements.md`）とは別に立てます。
+要件の ID は `DT-` で始めます。本機（PRC-163 風機）の要件（`PRC-163:docs/requirements.md`）とは別に立てます。
 
 ## 1. 目的と範囲
 

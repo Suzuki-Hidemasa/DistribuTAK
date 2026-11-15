@@ -1,6 +1,6 @@
 # DistribuTAK の機能仕様
 
-DistribuTAK の機能を、要件（`01-requirements.md`）の ID に結びつけて書きます。根拠は ADR 0030（`../decisions/0030-device-as-lan-router.md`）の答え 1〜107 です。「答え N」の引き方は `README.md` の 2 章のとおりです。
+DistribuTAK の機能を、要件（`01-requirements.md`）の ID に結びつけて書きます。根拠は ADR 0030（`PRC-163:docs/decisions/0030-device-as-lan-router.md`）の答え 1〜107 です。「答え N」の引き方は `README.md` の 2 章のとおりです。
 
 ADR 0030 で決まっていない点は「要確認」と書き、推測では埋めません。要確認の点は 11 章にまとめます。
 
