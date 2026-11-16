@@ -71,6 +71,17 @@ public final class AdminState {
             missingVersion.accept(Math.addExact(current.version(),1));return false;
         }
         if(candidate.version()==current.version() && AdminRecords.compare(candidate,current)<=0) return false;
+        checkChain(candidate,history);
+        var next=new TreeMap<>(chain);next.put(candidate.version(),candidate);
+        List<byte[]> events=append(candidate);
+        save(events,next,anchorSignature,revocations);chain=next;journal=events;return true;
+    }
+    /**
+     * 候補の一覧が、手元の信頼済みの鎖（直前の版）からつながるかを調べる。状態は変えない。
+     * <p>
+     * Checks that the candidate list continues from the trusted chain held here (the directly preceding version). State is not changed.
+     */
+    private void checkChain(AdminRecords.Record candidate,boolean history) {
         var previous=chain.lowerEntry(candidate.version());
         if(previous==null) throw new SecurityException("起点の差し替えには URL の管理者の添えた署名が必要です");
         candidate.verifySignature(ADMINS,group);
@@ -84,9 +95,28 @@ public final class AdminState {
             }
         }
         if(!previous.getValue().hasEntry(candidate.signer())) throw new ChainDisconnectedException();
-        var next=new TreeMap<>(chain);next.put(candidate.version(),candidate);
-        List<byte[]> events=append(candidate);
-        save(events,next,anchorSignature,revocations);chain=next;journal=events;return true;
+    }
+    /**
+     * 信頼済みの鎖にある、指定の版の管理者の一覧。持っていなければ null。
+     * <p>
+     * The administrator list of the given version in the trusted chain, or null when it is not held.
+     */
+    public synchronized AdminRecords.Record administratorsAt(long version) { return chain.get(version); }
+    /**
+     * 候補が今の最新の版と同じ版か、その次の版で、直前の信頼済みの版から鎖がつながるか。状態も保存も変えない。
+     * 管理用 DHT 記録の検査（04 §4.5）が、鎖の規則をもう一度書かずに使う。
+     * <p>
+     * Whether the candidate has the latest version or the next one and chains from the directly preceding trusted version.
+     * Neither state nor storage is changed. The managed DHT record check (04 §4.5) uses this instead of rewriting the chain rules.
+     */
+    public synchronized boolean continuesChain(AdminRecords.Record candidate) {
+        try {
+            var current=administrators();
+            if(candidate.kind()!=ADMINS||!Crypto.equal(group,candidate.group())||candidate.format()!=2) return false;
+            checkFuture(candidate);
+            if(candidate.version()>current.version()+1||candidate.version()<current.version()) return false;
+            checkChain(candidate,false);return true;
+        } catch(RuntimeException notChained) { return false; }
     }
     private boolean trustedLegacyList(AdminRecords.Record candidate) {
         for(byte[] trusted:journal)if(java.util.Arrays.equals(trusted,candidate.encode()))return false;
