@@ -48,6 +48,7 @@ public final class ManagementPage {
     public byte[] group(){return group.clone();}
     public byte[] objectDigest(){return digest.clone();}
     public byte[] data(){return data.clone();}
+    void wipeData(){Crypto.wipe(data);}
     public int totalBytes(){return total;}
     public int pageIndex(){return index;}
     public int pageCount(){return count;}

@@ -143,7 +143,7 @@ public final class CorePersistenceCoordinator {
         this.revocations=Objects.requireNonNull(revocations);this.wall=Objects.requireNonNull(wall);this.deadlines=Objects.requireNonNull(deadlines);
         group=admin.administrators().group();this.requirement=requirement;
         revocations.restore(admin);
-        recoveryPages=new ManagementPageAssembler(group,deadlines,new TransferResources());
+        recoveryPages=new ManagementPageAssembler(group,deadlines,new TransferResources(),true);
         synchronized(sessions){
             state=requirement==null?State.RUNNING:State.RECOVERING_REVOCATIONS;recoveryStarted=deadlines.millis();
             sessions.coordinate(this,requirement!=null);
@@ -175,6 +175,14 @@ public final class CorePersistenceCoordinator {
      */
     public void execute(Operation op,Runnable action){synchronized(sessions){require(op);action.run();}}
     boolean acceptsPackets(){return permits(Operation.HANDSHAKE);}
+    boolean acceptsPersistingData(){return state==State.PERSISTING&&requirement==null&&!sessions.isClosed();}
+    void requireReceivedData(byte[] wire){
+        if(!acceptsPersistingData()){requireData(wire);return;}
+        try{
+            if(ManagementPage.decodeEnvelope(wire).kind()!=ManagementPage.Kind.REVOCATION)throw invalid();
+        }catch(IllegalArgumentException bad){throw new IllegalStateException("Revocation pages only during persistence");}
+    }
+    void forgetManagementPages(byte[] peer){recoveryPages.forget(peer);}
     void requireData(byte[] wire){
         if(state==State.RUNNING)return;
         if(state!=State.RECOVERING_REVOCATIONS||recoveryExpired())throw new IllegalStateException("Group communication is suspended");
@@ -214,26 +222,30 @@ public final class CorePersistenceCoordinator {
         candidate.verify(AdminRecords.Kind.REVOCATIONS,group,admin.administrators());
         if(candidate.signedAt()>wall.millis()&&candidate.signedAt()-wall.millis()>300_000)throw new SecurityException("Future signing time");
     }
-    public boolean receiveRevocations(AdminRecords.Record candidate,PersistenceHooks hooks){return persist(candidate,hooks,true,false);}
-    public boolean persistLocalRevocations(AdminRecords.Record candidate,PersistenceHooks hooks){return persist(candidate,hooks,false,false);}
-    private boolean persist(AdminRecords.Record candidate,PersistenceHooks hooks,boolean received,boolean recovery){
+    private enum PersistenceResult {SAVED,EXACT_MATCH,REJECTED}
+    public boolean receiveRevocations(AdminRecords.Record candidate,PersistenceHooks hooks){return persist(candidate,hooks,true,false)==PersistenceResult.SAVED;}
+    public boolean persistLocalRevocations(AdminRecords.Record candidate,PersistenceHooks hooks){return persist(candidate,hooks,false,false)==PersistenceResult.SAVED;}
+    private PersistenceResult persist(AdminRecords.Record candidate,PersistenceHooks hooks,boolean received,boolean recovery){
         return persist(candidate,hooks,received,recovery,null,null,null);
     }
     boolean persistRotation(AdminRecords.Record candidate,KeyAnnouncement announcement,byte[] key,KeyRotationCoordinator.Publication publication,PersistenceHooks hooks){
-        return persist(candidate,hooks,false,false,announcement,key,publication);
+        return persist(candidate,hooks,false,false,announcement,key,publication)==PersistenceResult.SAVED;
     }
-    private boolean persist(AdminRecords.Record candidate,PersistenceHooks hooks,boolean received,boolean recovery,KeyAnnouncement announcement,byte[] key,KeyRotationCoordinator.Publication publication){
+    private PersistenceResult persist(AdminRecords.Record candidate,PersistenceHooks hooks,boolean received,boolean recovery,KeyAnnouncement announcement,byte[] key,KeyRotationCoordinator.Publication publication){
         Objects.requireNonNull(hooks);final AdminState prepared;final AdminRecordStore.Snapshot base,next;final long token,generation;
         final AdminState.PreparedPersistence persistence;final RevocationUnion.PreparedAddition addition;
         synchronized(sessions){
-            if(recovery){if(state!=State.RECOVERING_REVOCATIONS||recoveryExpired())return false;}
+            if(recovery){if(state!=State.RECOVERING_REVOCATIONS||recoveryExpired())return PersistenceResult.REJECTED;}
             else require(Operation.ADMINISTRATION);
             verifyRevocations(candidate);
-            if(recovery&&(!requirement.covers(candidate)||!revocations.covers(candidate)))return false;
+            if(recovery&&(!requirement.covers(candidate)||!revocations.covers(candidate)))return PersistenceResult.REJECTED;
             base=admin.snapshot();prepared=admin.fork();boolean changed=prepared.acceptRevocations(candidate);
-            if(!changed&&!recovery)return false;
+            // 和が増えない非勝者は、保存済みの正確な全体と一致するときだけ確認できる。
+            // A non-winning list that does not grow the union can be confirmed only when its entire contents exactly match the saved list.
+            if(!changed&&!recovery)return Arrays.equals(candidate.encode(),admin.revocations().encode())
+                    ?PersistenceResult.EXACT_MATCH:PersistenceResult.REJECTED;
             if(announcement!=null)prepared.recordGroupKey(announcement,key,announcement.keyVersion());
-            if(recovery&&(!requirement.covers(prepared.revocations())||!revocations.covers(prepared.revocations())))return false;
+            if(recovery&&(!requirement.covers(prepared.revocations())||!revocations.covers(prepared.revocations())))return PersistenceResult.REJECTED;
             next=prepared.snapshot();generation=sessions.generation();
             addition=revocations.prepareAddition(candidate);
             try{persistence=admin.preparePersistence(base,prepared);}catch(RuntimeException failure){addition.close();throw failure;}
@@ -271,12 +283,12 @@ public final class CorePersistenceCoordinator {
                     throw new IllegalStateException("Stale persistence completion");
                 persistence.publish();if(!received)addition.commit();
                 sessions.rejectRevokedPeers();sessions.refresh();
-                state=State.RUNNING;requirement=null;recoveryPages.clear();
+                state=State.RUNNING;requirement=null;
                 if(announcement!=null)sessions.rotateGroupKey(key,announcement.keyVersion());
                 selfRevoked=sessions.localRevoked();
             }
             persistence.close();
-            if(selfRevoked)hooks.selfRevoked();return true;
+            if(selfRevoked)hooks.selfRevoked();return PersistenceResult.SAVED;
         }catch(RuntimeException failure){
             synchronized(sessions){
                 if(operation==token){
@@ -287,7 +299,7 @@ public final class CorePersistenceCoordinator {
                     else state=State.RUNNING;
                 }
             }
-            if(received||committed||durable)hooks.stopped(stopReason());return false;
+            if(received||committed||durable)hooks.stopped(stopReason());return PersistenceResult.REJECTED;
         }
     }
     /**
@@ -334,19 +346,45 @@ public final class CorePersistenceCoordinator {
         recoveryPages.clear();recoveryPeer=null;recoverySession=null;recoveryOperation=null;
     }}
     public ManagementPageAssembler.Result receiveRecoveryPage(byte[] peer,byte[] session,long generation,ManagementPage page,PersistenceHooks hooks){
-        final ManagementPageAssembler.Result result;
+        return receiveRevocationPage(peer,session,generation,page,hooks,deadlines.millis());
+    }
+    /**
+     * 通常受信と束縛済み復旧の組立を共有し、検証・保存確定後だけ完了ACKを返す。
+     * <p>
+     * Shares assembly between normal reception and bound recovery, returning completion ACKs only after verification and durable persistence.
+     */
+    public ManagementPageAssembler.Result receiveRevocationPage(byte[] peer,byte[] session,long generation,ManagementPage page,
+            PersistenceHooks hooks,long receivedAt){
+        final ManagementPageAssembler.Result result;final boolean recovery;
         synchronized(sessions){
-            if(state!=State.RECOVERING_REVOCATIONS||recoveryExpired()||recoveryPeer==null||!Arrays.equals(peer,recoveryPeer)
-                    ||!Arrays.equals(session,recoverySession)||generation!=recoveryGeneration||!current(peer,session,generation)
-                    ||page.kind()!=ManagementPage.Kind.REVOCATION||!Arrays.equals(page.operationId(),recoveryOperation))
+            recovery=state==State.RECOVERING_REVOCATIONS;
+            if((!recovery&&state!=State.RUNNING)||isRevoked(peer)||!current(peer,session,generation)
+                    ||page.kind()!=ManagementPage.Kind.REVOCATION)
                 return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.REJECTED,null);
-            result=recoveryPages.receive(peer,session,generation,page);
+            if(recovery&&(recoveryExpired()||recoveryPeer==null||!Arrays.equals(peer,recoveryPeer)
+                    ||!Arrays.equals(session,recoverySession)||generation!=recoveryGeneration||!Arrays.equals(page.operationId(),recoveryOperation)))
+                return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.REJECTED,null);
+            result=recoveryPages.receiveAt(peer,session,generation,page,receivedAt);
         }
-        if(result.completed()!=null){
-            try{persist(AdminRecords.decode(result.completed().data()),hooks,true,true);}
-            catch(RuntimeException invalid){return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.REJECTED,null);}
-        }
-        return result;
+        if(result.completed()==null)return result;
+        byte[] encoded=result.completed().data();
+        try(var completed=result.completed()){
+            var record=AdminRecords.decode(encoded);
+            if(record.entries().size()!=completed.totalEntries())throw invalid();
+            var persisted=persist(record,hooks,true,recovery);
+            synchronized(sessions){
+                if(persisted==PersistenceResult.REJECTED||state!=State.RUNNING||isRevoked(peer)||!current(peer,session,generation)){
+                    recoveryPages.reject(peer,session,generation,page);
+                    return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.REJECTED,null);
+                }
+                var ack=recoveryPages.confirm(peer,session,generation,page);
+                if(ack==null)recoveryPages.reject(peer,session,generation,page);
+                return new ManagementPageAssembler.Result(result.status(),completed,ack);
+            }
+        }catch(RuntimeException invalid){
+            synchronized(sessions){recoveryPages.reject(peer,session,generation,page);}
+            return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.REJECTED,null);
+        }finally{Crypto.wipe(encoded);}
     }
     /**
      * 失効本体を保存した後でだけ包みを開く。新鍵の保存後も期限・世代・現在版を再検査する。

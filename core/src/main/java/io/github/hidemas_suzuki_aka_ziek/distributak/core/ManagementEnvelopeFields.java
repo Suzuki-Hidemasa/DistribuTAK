@@ -18,6 +18,15 @@ public final class ManagementEnvelopeFields {
             REVOCATIONS_RECOVERY_REQUEST=ManagementEnvelope.REVOCATIONS_RECOVERY_REQUEST_FIELD_NUMBER,
             PAGE_ACK=ManagementEnvelope.PAGE_ACK_FIELD_NUMBER;
     private ManagementEnvelopeFields(){}
+    /**
+     * 管理封筒を一度振り分けるための本体番号。構文が違う入力では0を返す。
+     * <p>
+     * Returns the body field for a single management-envelope dispatch, or zero for malformed input.
+     */
+    public static int field(byte[] wire){
+        try{return ManagementWire.unwrap(wire).field();}
+        catch(java.io.IOException|IllegalArgumentException invalid){return 0;}
+    }
     public static int[] supported(){return new int[]{REVOCATION_PAGE,DIRECTORY_PAGE,SIGNED_ANNOUNCEMENT,
             DIRECTORY_SUMMARY_PAGE,ADMIN_CONTROL,CERTIFICATE_RENEWAL,REVOCATIONS_RECOVERY_REQUEST,PAGE_ACK};}
 }
