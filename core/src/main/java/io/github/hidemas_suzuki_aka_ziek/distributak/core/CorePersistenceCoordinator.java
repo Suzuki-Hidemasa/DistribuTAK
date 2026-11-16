@@ -61,6 +61,13 @@ public final class CorePersistenceCoordinator {
     private long recoveryGeneration;
     private final ManagementPageAssembler recoveryPages;
     private final Map<DhtId,Notice> notices=new HashMap<>();
+    /**
+     * 通常稼働の調整層を作る。
+     * <p>
+     * Creates a coordinator for normal operation.
+     *
+     * @param deadlines 期限を数える単調時計を渡す。Pass a monotonic clock for deadlines.
+     */
     public CorePersistenceCoordinator(AdminState admin,SessionManager sessions,RevocationUnion revocations,Clock wall,Clock deadlines){
         this(admin,sessions,revocations,wall,deadlines,null);
     }
@@ -68,6 +75,8 @@ public final class CorePersistenceCoordinator {
      * 回復では再起動後の新しい SessionManager を渡す。旧セッションや停止済みインスタンスを復元しない。
      * <p>
      * Recovery requires a fresh SessionManager after restart; never restores old sessions or stopped instances.
+     *
+     * @param deadlines 期限を数える単調時計を渡す。Pass a monotonic clock for deadlines.
      */
     public CorePersistenceCoordinator(AdminState admin,SessionManager sessions,RevocationUnion revocations,Clock wall,Clock deadlines,
             RecoveryRequirement requirement){
@@ -82,8 +91,13 @@ public final class CorePersistenceCoordinator {
     }
     private static IllegalArgumentException invalid(){return new IllegalArgumentException("Invalid persistence or recovery state");}
     public State state(){synchronized(sessions){return state;}}
-    public String statusText(){synchronized(sessions){return state==State.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS?"保存がいっぱい":"";}}
-    public boolean isRevoked(byte[] subject){synchronized(sessions){return revocations.contains(subject);}}
+    public String statusText(){synchronized(sessions){
+        return state==State.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS||state==State.PERSISTING&&requirement!=null?"保存がいっぱい":"";
+    }}
+    public boolean isRevoked(byte[] subject){synchronized(sessions){
+        return revocations.contains(subject)||requirement!=null&&requirement.subjects!=null
+                &&Collections.binarySearch(requirement.subjects,subject,AdminRecords::compareBytes)>=0;
+    }}
     public boolean permits(Operation op){synchronized(sessions){
         Objects.requireNonNull(op);
         if(sessions.isClosed())return false;
@@ -131,6 +145,7 @@ public final class CorePersistenceCoordinator {
     public boolean persistLocalRevocations(AdminRecords.Record candidate,PersistenceHooks hooks){return persist(candidate,hooks,false,false);}
     private boolean persist(AdminRecords.Record candidate,PersistenceHooks hooks,boolean received,boolean recovery){
         Objects.requireNonNull(hooks);final AdminState prepared;final AdminRecordStore.Snapshot base,next;final long token,generation;
+        final AdminState.PreparedPersistence persistence;final RevocationUnion.PreparedAddition addition;
         synchronized(sessions){
             if(recovery){if(state!=State.RECOVERING_REVOCATIONS||recoveryExpired())return false;}
             else require(Operation.ADMINISTRATION);
@@ -139,41 +154,51 @@ public final class CorePersistenceCoordinator {
             base=admin.snapshot();prepared=admin.fork();boolean changed=prepared.acceptRevocations(candidate);
             if(!changed&&!recovery)return false;
             if(recovery&&(!requirement.covers(prepared.revocations())||!revocations.covers(prepared.revocations())))return false;
-            next=prepared.snapshot();generation=sessions.generation();token=++operation;
+            next=prepared.snapshot();generation=sessions.generation();
+            addition=revocations.prepareAddition(candidate);
+            try{persistence=admin.preparePersistence(base,prepared);}catch(RuntimeException failure){addition.close();throw failure;}
+            token=++operation;
             if(received){
                 byte[] encoded=candidate.encode();
                 if(encoded.length<=4*ManagementPage.PAGE_BYTES)for(byte[] subject:candidate.entries()){
                     var verified=sessions.verifiedSession(subject);
                     if(verified!=null)notices.put(new DhtId(subject),new Notice(verified.sessionId(),generation,deadlines.millis(),encoded));
                 }
-                revocations.add(candidate);
+                addition.commit();
                 sessions.rejectRevokedPeers();
             }
             state=State.PERSISTING;
         }
-        try{
+        boolean committed=false;
+        try(persistence;addition){
             if(received)hooks.active(next);
-            hooks.save(next);admin.persistPrepared(base,prepared);
+            hooks.save(next);
+            synchronized(sessions){
+                if(operation!=token||state!=State.PERSISTING||sessions.generation()!=generation||!AdminState.sameSnapshot(base,admin.snapshot()))
+                    throw new IllegalStateException("Stale persistence before commit");
+                verifyRevocations(candidate);
+            }
+            persistence.save();committed=true;
             if(received)hooks.clear(next);
             final boolean selfRevoked;
             synchronized(sessions){
-                if(operation!=token||state!=State.PERSISTING||sessions.generation()!=generation||!AdminState.sameSnapshot(base,admin.snapshot()))
+                if(received&&(operation!=token||state!=State.PERSISTING||sessions.generation()!=generation))
                     throw new IllegalStateException("Stale persistence completion");
-                verifyRevocations(candidate);
-                admin.publishPrepared(base,prepared);if(!received)revocations.add(candidate);
+                persistence.publish();if(!received)addition.commit();
                 sessions.rejectRevokedPeers();sessions.refresh();
                 state=State.RUNNING;requirement=null;recoveryPages.clear();
                 selfRevoked=sessions.localRevoked();
             }
+            persistence.close();
             if(selfRevoked)hooks.selfRevoked();return true;
         }catch(RuntimeException failure){
             synchronized(sessions){
                 if(operation==token){
-                    if(received){state=State.STORAGE_FAILED;sessions.storageFailed();recoveryPages.clear();}
+                    if(received||committed){state=State.STORAGE_FAILED;sessions.storageFailed();recoveryPages.clear();}
                     else state=State.RUNNING;
                 }
             }
-            if(received)hooks.stopped();return false;
+            if(received||committed)hooks.stopped();return false;
         }
     }
     /**
@@ -199,7 +224,7 @@ public final class CorePersistenceCoordinator {
      * Binds recovery requests to an authenticated peer, session and generation. Retries change neither deadline nor operation.
      */
     public boolean bindRecovery(byte[] peer,byte[] session,long generation,RevocationsRecoveryRequest request){synchronized(sessions){
-        if(state!=State.RECOVERING_REVOCATIONS||recoveryExpired()||!current(peer,session,generation)
+        if(state!=State.RECOVERING_REVOCATIONS||recoveryExpired()||isRevoked(peer)||!current(peer,session,generation)
                 ||!Crypto.equal(group,request.group())||request.requiredVersion()!=requirement.version||!Crypto.equal(request.targetDigest(),requirement.digest))return false;
         if(recoveryPeer!=null&&!current(recoveryPeer,recoverySession,recoveryGeneration)){
             recoveryPages.forget(recoveryPeer);recoveryPeer=null;recoverySession=null;

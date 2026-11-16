@@ -20,6 +20,7 @@ public final class RevocationUnion {
     private final byte[] group;
     private final TrustedAdmins trust;
     private final SortedSet<byte[]> subjects=new TreeSet<>(AdminRecords::compareBytes);
+    private PreparedAddition pending;
 
     /**
      * @param group グループの識別子。The group identifier.
@@ -40,15 +41,41 @@ public final class RevocationUnion {
      * @throws AdminRecords.RevocationLimitException 足すと上限を超えるとき。和は変わらない。When the addition would pass the limit; the union is unchanged.
      */
     public synchronized boolean add(AdminRecords.Record list) {
+        try(var addition=prepareAddition(list)){return addition.commit();}
+    }
+
+    /**
+     * 保存前に署名と上限を検査し、公開まで追加枠を予約する。読み取りは止めず、競合する追加は断る。
+     * <p>
+     * Checks signatures and limits before persistence and reserves capacity until publication. Reads proceed; competing additions are refused.
+     *
+     * @param list 失効の一覧。The revocation list.
+     * @return 公開または取り消す予約。The reservation to publish or cancel.
+     */
+    public synchronized PreparedAddition prepareAddition(AdminRecords.Record list) {
+        if(pending!=null)throw new IllegalStateException("Revocation addition is reserved");
         list.verify(AdminRecords.Kind.REVOCATIONS,group,trust.latest().entries());
         var fresh=new TreeSet<byte[]>(AdminRecords::compareBytes);
         for(byte[] subject:list.entries()){
             if(!subjects.contains(subject)){fresh.add(subject);}
         }
-        if(fresh.isEmpty()){return false;}
         if(subjects.size()+fresh.size()>AdminRecords.MAX_ENTRIES){throw new AdminRecords.RevocationLimitException();}
-        subjects.addAll(fresh);
-        return true;
+        pending=new PreparedAddition(fresh);return pending;
+    }
+
+    /**
+     * 検査済みの追加。確定時には署名や上限を再検査せず、予約した対象だけを公開する。
+     * <p>
+     * A checked addition. Commit publishes only reserved subjects without rechecking signatures or capacity.
+     */
+    public final class PreparedAddition implements AutoCloseable {
+        private final SortedSet<byte[]> fresh;
+        private PreparedAddition(SortedSet<byte[]> fresh){this.fresh=fresh;}
+        public boolean commit(){synchronized(RevocationUnion.this){
+            if(pending!=this)throw new IllegalStateException("Revocation reservation is inactive");
+            subjects.addAll(fresh);pending=null;return !fresh.isEmpty();
+        }}
+        public void close(){synchronized(RevocationUnion.this){if(pending==this)pending=null;}}
     }
 
     /**

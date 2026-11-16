@@ -11,6 +11,22 @@ import static io.github.hidemas_suzuki_aka_ziek.distributak.core.AdminRecordsTes
 import static io.github.hidemas_suzuki_aka_ziek.distributak.core.CorePersistenceCoordinator.*;
 
 class CorePersistenceCoordinatorTest {
+    static final class BlockingStore implements AdminRecordStore {
+        final InMemoryAdminRecordStore delegate=new InMemoryAdminRecordStore();
+        final CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
+        volatile boolean block;
+        Runnable beforeSave=()->{};
+        public Snapshot load(){return delegate.load();}
+        public void clear(){delegate.clear();}
+        public void save(Snapshot snapshot){
+            if(block){
+                entered.countDown();
+                try{if(!release.await(5,TimeUnit.SECONDS))throw new IllegalStateException("test timeout");}
+                catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}
+            }
+            beforeSave.run();delegate.save(snapshot);
+        }
+    }
     final SessionManagerTest f=new SessionManagerTest();
     Clock deadlines(){return new MonotonicClock(()->f.time.nanos);}
     RevocationUnion union(SessionManagerTest.Node n){
@@ -117,6 +133,91 @@ class CorePersistenceCoordinatorTest {
             assertFalse(c.isRevoked(b.id));assertEquals(0,a.state.revocations().version());
         }
     }
+    @Test void ownCandidateStaleBeforeStoreDoesNotWriteNewRevocations()throws Exception{
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var c=coordinator(a);var store=(AdminRecordStore)SessionManagerTest.field(a.state,"store");
+            assertFalse(c.persistLocalRevocations(revoked(b.id),hooks(a.sessions::forgetAllVolatile)));
+            assertEquals(0,store.load().revocationVersion());assertEquals(0,a.state.revocations().version());
+            assertFalse(c.isRevoked(b.id));assertEquals(State.RUNNING,c.state());
+        }
+    }
+    @Test void ownCandidateGenerationChangeDuringStoreStillPublishesCommittedRevocation(){
+        var store=new BlockingStore();
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var admin=new AdminState(f.group,Crypto.ed25519Public(f.admin),f.time,store);
+            var admins=a.state.administrators();admin.bootstrap(admins,AdminRecords.signAnchor(admins,f.admin));
+            admin.acceptRevocations(a.state.revocations());
+            try(var sessions=new SessionManager(admin,a.cert,a.secret,f.psk,0,f.time,()->f.time.nanos,256)){
+                var union=new RevocationUnion(f.group,new AdminStateTrust(admin));union.add(admin.revocations());
+                var c=new CorePersistenceCoordinator(admin,sessions,union,f.time,deadlines());
+                store.beforeSave=sessions::forgetAllVolatile;
+                assertTrue(c.persistLocalRevocations(revoked(b.id),hooks(()->{})));
+                assertEquals(1,store.load().revocationVersion());assertEquals(1,admin.revocations().version());
+                assertTrue(c.isRevoked(b.id));assertEquals(State.RUNNING,c.state());
+                assertThrows(SecurityException.class,()->sessions.rememberPeer(b.cert));
+            }
+        }
+    }
+    @Test void ownCandidateReservesAdminBaseBeforeActualStore(){
+        var store=new BlockingStore();
+        try(var a=f.new Node(1)){
+            var admin=new AdminState(f.group,Crypto.ed25519Public(f.admin),f.time,store);
+            var admins=a.state.administrators();admin.bootstrap(admins,AdminRecords.signAnchor(admins,f.admin));
+            admin.acceptRevocations(a.state.revocations());
+            try(var sessions=new SessionManager(admin,a.cert,a.secret,f.psk,0,f.time,()->f.time.nanos,256)){
+                var union=new RevocationUnion(f.group,new AdminStateTrust(admin));union.add(admin.revocations());
+                var c=new CorePersistenceCoordinator(admin,sessions,union,f.time,deadlines());
+                var other=AdminRecords.list(AdminRecords.Kind.REVOCATIONS,f.group,2,f.time.millis(),List.of(),f.admin);
+                store.beforeSave=()->{store.beforeSave=()->{};assertThrows(IllegalStateException.class,()->admin.acceptRevocations(other));};
+                assertTrue(c.persistLocalRevocations(revoked(),hooks(()->{})));
+                assertEquals(1,store.load().revocationVersion());assertEquals(1,admin.revocations().version());
+            }
+        }
+    }
+    @Test void ownCandidateReservesUnionWithoutPublishingBeforeSave(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var union=union(a);var c=new CorePersistenceCoordinator(a.state,a.sessions,union,f.time,deadlines());
+            assertTrue(c.persistLocalRevocations(revoked(b.id),hooks(()->{
+                assertFalse(c.isRevoked(b.id));assertEquals(0,a.state.revocations().version());
+                assertThrows(IllegalStateException.class,()->union.add(revoked(key(62))));
+            })));
+            assertTrue(c.isRevoked(b.id));assertTrue(union.add(revoked(key(62))));
+        }
+    }
+    @Test void cancelledOwnCandidateReleasesAdminAndUnionReservations(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var union=union(a);var c=new CorePersistenceCoordinator(a.state,a.sessions,union,f.time,deadlines());
+            assertFalse(c.persistLocalRevocations(revoked(b.id),hooks(()->{throw new IllegalStateException("test");})));
+            assertFalse(c.isRevoked(b.id));assertTrue(union.add(revoked(key(62))));
+            assertTrue(a.state.acceptRevocations(revoked(key(62))));assertEquals(State.RUNNING,c.state());
+        }
+    }
+    RevocationUnion fullUnion(SessionManagerTest.Node a){
+        var union=union(a);var entries=new ArrayList<byte[]>();
+        for(int i=0;i<AdminRecords.MAX_ENTRIES;i++){
+            byte[] subject=new byte[32];java.nio.ByteBuffer.wrap(subject).putInt(i);subject[31]=(byte)0xEE;entries.add(subject);
+        }
+        union.add(AdminRecords.list(AdminRecords.Kind.REVOCATIONS,f.group,0,f.time.millis(),entries,f.admin));return union;
+    }
+    @Test void ownCandidateOverUnionLimitIsRejectedBeforeAnySave()throws Exception{
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var union=fullUnion(a);var c=new CorePersistenceCoordinator(a.state,a.sessions,union,f.time,deadlines());
+            var store=(AdminRecordStore)SessionManagerTest.field(a.state,"store");
+            assertThrows(AdminRecords.RevocationLimitException.class,()->c.persistLocalRevocations(revoked(b.id),hooks(()->fail("save reached"))));
+            assertEquals(0,store.load().revocationVersion());assertEquals(0,a.state.revocations().version());
+            assertEquals(State.RUNNING,c.state());assertFalse(c.isRevoked(b.id));
+        }
+    }
+    @Test void receivedOverUnionLimitDoesNotQueueFinalNoticeOrSave(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            f.connect(a,b);byte[] session=a.sessions.sessionId(b.id);var union=fullUnion(a);
+            var c=new CorePersistenceCoordinator(a.state,a.sessions,union,f.time,deadlines());var r=revoked(b.id);
+            var page=ManagementPage.split(ManagementPage.Kind.REVOCATION,new byte[16],f.group,r.encode(),1).get(0);
+            assertThrows(AdminRecords.RevocationLimitException.class,()->c.receiveRevocations(r,hooks(()->fail("save reached"))));
+            assertFalse(c.maySendFinalNotice(b.id,session,a.sessions.generation(),page.envelope()));
+            assertTrue(a.sessions.isEstablished(b.id));assertEquals(0,a.state.revocations().version());assertEquals(State.RUNNING,c.state());
+        }
+    }
     @Test void activeSaveClearAndApplyHaveFixedOrder(){
         try(var a=f.new Node(1)){
             var c=coordinator(a);var order=new ArrayList<String>();
@@ -154,6 +255,15 @@ class CorePersistenceCoordinatorTest {
             for(var op:Operation.values())assertFalse(c.permits(op));
         }
     }
+    @Test void savedSelfRevocationReleasesAdminReservationBeforeEraseHook(){
+        try(var a=f.new Node(1)){
+            var c=coordinator(a);boolean[] erased={false};
+            assertTrue(c.receiveRevocations(revoked(a.id),new PersistenceHooks(){
+                public void save(AdminRecordStore.Snapshot s){}
+                public void selfRevoked(){a.state.clear();erased[0]=true;}
+            }));assertTrue(erased[0]);assertTrue(a.sessions.isClosed());
+        }
+    }
     @Test void duplicateRevocationsDoNotRepeatPersistence(){
         try(var a=f.new Node(1)){
             var c=coordinator(a);var r=revoked();assertTrue(c.receiveRevocations(r,hooks(()->{})));
@@ -177,6 +287,34 @@ class CorePersistenceCoordinatorTest {
                 assertTrue(entered.await(5,TimeUnit.SECONDS));assertEquals(State.PERSISTING,c.state());assertDoesNotThrow(c::poll);
                 release.countDown();assertTrue(result.get(5,TimeUnit.SECONDS));
             }finally{release.countDown();pool.shutdownNow();}
+        }
+    }
+    @Test void actualAdminStoreIoAllowsPollRefreshAndReceiveToReturnBeforeSaveCompletes()throws Exception{
+        var store=new BlockingStore();
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var admin=new AdminState(f.group,Crypto.ed25519Public(f.admin),f.time,store);
+            var admins=a.state.administrators();admin.bootstrap(admins,AdminRecords.signAnchor(admins,f.admin));
+            admin.acceptRevocations(a.state.revocations());
+            try(var sessions=new SessionManager(admin,a.cert,a.secret,f.psk,0,f.time,()->f.time.nanos,256)){
+                sessions.rememberPeer(b.cert);b.remember(a);
+                var second=b.sessions.receive(sessions.start(b.id).packet());
+                b.sessions.receive(sessions.receive(second.outbound().get(0).packet()).outbound().get(0).packet());
+                var union=new RevocationUnion(f.group,new AdminStateTrust(admin));union.add(admin.revocations());
+                var c=new CorePersistenceCoordinator(admin,sessions,union,f.time,deadlines());
+                byte[] packet=f.data(b,a,1);sessions.rotateGroupKey(key(40),1);
+                var pool=Executors.newFixedThreadPool(2);store.block=true;
+                try{
+                    var saved=pool.submit(()->c.receiveRevocations(revoked(),hooks(()->{})));
+                    assertTrue(store.entered.await(2,TimeUnit.SECONDS));f.time.advance(180);
+                    var processed=pool.submit(()->{
+                        assertTrue(sessions.poll().isEmpty());c.poll();sessions.refresh();
+                        assertFalse(sessions.isEstablished(b.id));
+                        assertThrows(IllegalStateException.class,()->sessions.receive(packet));
+                    });
+                    processed.get(1,TimeUnit.SECONDS);
+                    assertFalse(saved.isDone());store.release.countDown();assertTrue(saved.get(2,TimeUnit.SECONDS));
+                }finally{store.release.countDown();pool.shutdownNow();}
+            }
         }
     }
     @Test void oldGroupKeyCannotCreateNewSessionAfterRotation(){

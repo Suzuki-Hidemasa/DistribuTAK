@@ -40,6 +40,31 @@ class RevocationsRecoveryTest {
             assertThrows(IllegalStateException.class,()->a.sessions.rotateGroupKey(key(40),1));
         }
     }
+    @Test void stoppedSubjectsRejectRegistrationWithEmptySavedUnion(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var c=recovering(a,new RecoveryRequirement(1,revocationDigest(List.of(b.id)),List.of(b.id)));
+            assertTrue(c.isRevoked(b.id));
+            assertThrows(SecurityException.class,()->a.remember(b));
+            assertFalse(c.bindRecovery(b.id,new byte[16],a.sessions.generation(),
+                    new RevocationsRecoveryRequest(f.group,operation,1,revocationDigest(List.of(b.id)))));
+        }
+    }
+    @Test void stoppedSubjectsRejectOutboundHandshakeEvenIfPreviouslyRegistered(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            a.remember(b);recovering(a,new RecoveryRequirement(1,revocationDigest(List.of(b.id)),List.of(b.id)));
+            assertThrows(SecurityException.class,()->a.sessions.start(b.id));
+            assertFalse(a.sessions.isEstablished(b.id));
+        }
+    }
+    @Test void stoppedSubjectsRejectIncomingHandshakeWithEmptySavedUnion(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            a.remember(b);b.remember(a);
+            recovering(a,new RecoveryRequirement(1,revocationDigest(List.of(b.id)),List.of(b.id)));
+            var packet=b.sessions.start(a.id).packet();
+            assertThrows(SecurityException.class,()->a.sessions.receive(packet));
+            assertFalse(a.sessions.isEstablished(b.id));
+        }
+    }
     @Test void u1DropsCotAnnouncementsRosterAndRenewalInsteadOfStartingNormalDispatch(){
         try(var a=f.new Node(1);var b=f.new Node(2)){
             var c=recovering(a,requirement());bind(c,a,b);
@@ -108,6 +133,50 @@ class RevocationsRecoveryTest {
             var c=recovering(a,requirement());bind(c,a,b);
             deliver(c,a,b,t.revoked(target),t.hooks(()->{throw new IllegalStateException("test");}));
             assertEquals(State.STORAGE_FAILED,c.state());assertEquals("保存がいっぱい",c.statusText());assertTrue(a.sessions.isClosed());
+        }
+    }
+    @Test void recoveryKeepsStorageFullStatusThroughoutSaveAndClear(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var c=recovering(a,requirement());bind(c,a,b);
+            deliver(c,a,b,t.revoked(target),new PersistenceHooks(){
+                public void save(AdminRecordStore.Snapshot s){assertEquals("保存がいっぱい",c.statusText());}
+                public void clear(AdminRecordStore.Snapshot s){assertEquals("保存がいっぱい",c.statusText());}
+            });assertEquals(State.RUNNING,c.state());assertEquals("",c.statusText());
+        }
+    }
+    @Test void ordinaryPersistenceDoesNotShowStorageFullStatus(){
+        try(var a=f.new Node(1)){
+            var c=t.coordinator(a);
+            assertTrue(c.receiveRevocations(t.revoked(),new PersistenceHooks(){
+                public void save(AdminRecordStore.Snapshot s){assertEquals("",c.statusText());}
+                public void clear(AdminRecordStore.Snapshot s){assertEquals("",c.statusText());}
+            }));assertEquals("",c.statusText());
+        }
+    }
+    @Test void recoverySaveStartedAt239SecondsCanFinishAt241Seconds(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var c=recovering(a,requirement());f.time.advance(239);bind(c,a,b);
+            deliver(c,a,b,t.revoked(target),t.hooks(()->{f.time.advance(2);c.poll();}));
+            assertEquals(State.RUNNING,c.state());assertEquals(1,a.state.revocations().version());
+            assertTrue(c.permits(Operation.COT_SEND));
+        }
+    }
+    @Test void recoverySaveCannotStartAt241Seconds(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var c=recovering(a,requirement());bind(c,a,b);f.time.advance(241);
+            assertEquals(ManagementPageAssembler.Status.REJECTED,deliver(c,a,b,t.revoked(target),t.hooks(()->fail("save reached"))).status());
+            assertEquals(State.RECOVERING_REVOCATIONS,c.state());assertEquals(0,a.state.revocations().version());
+            assertFalse(c.permits(Operation.HANDSHAKE));
+        }
+    }
+    @Test void rejectedRecoveryAndRequestRetryDoNotRestart240SecondDeadline(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var c=recovering(a,requirement());f.time.advance(239);bind(c,a,b);
+            deliver(c,a,b,t.revoked(),t.hooks(()->fail("save reached")));
+            assertTrue(c.bindRecovery(b.id,a.sessions.sessionId(b.id),a.sessions.generation(),request()));
+            f.time.advance(1);assertFalse(c.permits(Operation.RECOVERY_REQUEST));
+            assertFalse(c.bindRecovery(b.id,a.sessions.sessionId(b.id),a.sessions.generation(),request()));
+            f.time.advance(1);assertEquals(State.RECOVERING_REVOCATIONS,c.state());assertEquals(0,a.state.revocations().version());
         }
     }
     @Test void requestRetriesDoNotExtendGlobal240SecondDeadline(){
