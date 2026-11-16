@@ -1,9 +1,11 @@
 ---
 id: DTAK-9
 title: '第13段の残り: グループの管理（管理者の追加と削除・取り消しと鍵の入れ替え）を仕上げる（PRC-21.21 の引き継ぎ）'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-16 00:24'
+updated_date: '2026-11-16 01:47'
 labels:
   - stage-13
 dependencies: []
@@ -30,3 +32,15 @@ PRC-163 のタスク PRC-21.21（ADR 0030 答え 167 の第13段）の未了の�
 - [ ] #5 S20 と Xperia 1 で、片方を取り消して鍵を入れ替え、取り消した側がつながれなくなることを確かめている（グループの消去と作り直しは 2026-12-03 ごろまでしない）
 - [ ] #6 logcat に CoT の中身・鍵・招待・TOTP・PSK が出ていない
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+第4回（核のみ）: 管理用DHT記録 ManagedDhtRecord（種類2〜6、外側/内側署名、DHT番号再計算）、共通検証器、同版競合・失効集合Rの比較、自己削除の例外、768B判定とTransfer境界、種類4の受け手証明書同梱（R3=A案）、3者試験。続く第5〜9回は DTAK-9 に残す。根拠: out/reviews/20261115-distributak-stage13/proposal-v3.md §3.1-3.3, §10、ADR 0030 答え208-214。
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+第4回（核）の最初の区切りを実装した（未コミットだったものをコミット）。管理用 DHT 記録の外側 ManagedDhtRecord（種類 2〜6）、DhtKeys の種類 2〜6 と版ごとの宛先、ManagedStatus・ManagedRejected、試験 約 21 件追加（核 1,207 件合格、lint-core の NewApi=0）。設計書 04 §4.5 に追記。実測: 失効が最大数値で 7 件のとき 755 バイト（768 に収まる）、8 件で 789 バイト（収まらない）。1 件ごとに 34 バイト増える。未了: 権限（管理者の連鎖）・版の競合・失効の和・自己削除の例外・種類 4 の同梱証明書の検査・三者試験（第4回の残り）、第5回以降。実機（AC 5）は証明書更新の実機試験（2026-12-03 ごろ以降）のあと。
+<!-- SECTION:NOTES:END -->
