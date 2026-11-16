@@ -15,12 +15,22 @@ public final class GroupKeyEnvelope {
     /** 引数の秘密配列は呼び出し元が所有する。内部の写しは成功・失敗とも消す。 */
     public static AdminRecords.Record wrap(byte[] group, byte[] recipient, byte[] handshake, long version,
                                             long signedAt, byte[] groupKey, byte[] adminSecret) {
+        return wrap(group,recipient,handshake,version,signedAt,groupKey,adminSecret,null);
+    }
+    /** 告知の digest を署名に含めた形式 2 を作る。HPKE の入力は変えない。
+     * <p>
+     * Creates format 2 with the announcement digest in the signature. HPKE inputs are unchanged.
+     */
+    public static AdminRecords.Record wrap(byte[] group,byte[] recipient,byte[] handshake,long version,
+                                            long signedAt,byte[] groupKey,byte[] adminSecret,byte[] announcementDigest) {
         Crypto.length(group,32);Crypto.length(recipient,32);Crypto.length(handshake,32);Crypto.length(groupKey,32);
         if(version<0 || signedAt<0) throw new IllegalArgumentException("版か時刻が負です");
         byte[] key=groupKey.clone();
         try(var sender=Hpke.sender(handshake,info(group))) {
             byte[] cipher=sender.seal(aad(group,recipient,handshake,version,Crypto.ed25519Public(adminSecret)),key);
-            return AdminRecords.wrapped(group,version,signedAt,recipient,handshake,sender.encapsulation(),cipher,adminSecret);
+            return announcementDigest==null
+                    ?AdminRecords.wrapped(group,version,signedAt,recipient,handshake,sender.encapsulation(),cipher,adminSecret)
+                    :AdminRecords.wrapped(group,version,signedAt,recipient,handshake,sender.encapsulation(),cipher,adminSecret,announcementDigest);
         } finally { Crypto.wipe(key); }
     }
     /** currentVersion は信頼できる手元の現在版。-1 は鍵を1度も持っていないときだけ渡す。 */

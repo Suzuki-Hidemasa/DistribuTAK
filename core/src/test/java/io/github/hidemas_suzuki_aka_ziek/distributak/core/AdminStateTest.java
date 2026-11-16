@@ -102,6 +102,32 @@ class AdminStateTest {
         s.acceptAdministrators(merged,v->fail());assertEquals(3,s.reissue(previous,own,a).version());
         assertThrows(SecurityException.class,()->s.reissue(previous,own,b));
     }
+    @Test void administratorsAtReturnsOnlyTheTrustedVersions() {
+        var s=fresh();
+        assertArrayEquals(s.administrators().encode(),s.administratorsAt(0).encode());
+        assertNull(s.administratorsAt(1));
+        s.acceptAdministrators(admins(1,now,List.of(ap,cp),a),v->fail());
+        assertEquals(1,s.administratorsAt(1).version());assertEquals(0,s.administratorsAt(0).version());
+        assertNull(s.administratorsAt(2));assertNull(s.administratorsAt(-1));
+    }
+    @Test void continuesChainOnlyLooksAndNeverChangesTheTrustedState() {
+        var s=fresh();
+        // 次の版で、署名者が今の管理者なら鎖がつながる。見るだけで、信頼済みの版は進まない。
+        // The next version signed by a current administrator chains; it only looks, so the trusted version stays.
+        assertTrue(s.continuesChain(admins(1,now,List.of(ap,cp),a)));
+        assertEquals(0,s.administrators().version());assertNull(s.administratorsAt(1));
+        // 署名者が管理者でない・2 つ先・種類が違うものはつながらない。
+        // A non-administrator signer, a version two ahead, or the wrong kind does not chain.
+        assertFalse(s.continuesChain(admins(1,now,List.of(ap,cp),c)));
+        assertFalse(s.continuesChain(admins(2,now,List.of(ap,cp),a)));
+        assertFalse(s.continuesChain(revocations(1,now,List.of(),a)));
+        // 同じ版の競合は、直前の版から鎖でつながるときだけ。
+        // A same-version competitor chains only from the previous version.
+        s.acceptAdministrators(admins(1,now,List.of(ap,cp),a),v->fail());
+        assertTrue(s.continuesChain(admins(1,now+1,List.of(ap,bp),b)));
+        assertFalse(s.continuesChain(admins(1,now+1,List.of(ap,bp),c)));
+        assertEquals(1,s.administrators().version());
+    }
     @Test void bootstrapRequiresUrlAdministratorsAttachedSignature() {
         var first=admins(20,now,List.of(ap,bp),c);var s=new AdminState(group,ap,clock,new InMemoryAdminRecordStore());
         assertThrows(SecurityException.class,()->s.bootstrap(first,first.signature()));

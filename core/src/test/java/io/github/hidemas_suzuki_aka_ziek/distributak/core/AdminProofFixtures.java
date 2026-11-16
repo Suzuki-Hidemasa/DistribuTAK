@@ -2,8 +2,8 @@
 package io.github.hidemas_suzuki_aka_ziek.distributak.core;
 import java.util.*;
 /** 従来の一覧の試験を、対応する秘密鍵で所持証明した一覧へ移すための試料。 */
-final class AdminProofFixtures {
-    static AdminRecords.Record list(byte[] group,long version,long time,List<byte[]> keys,byte[] signer,byte[]... available) {
+public final class AdminProofFixtures {
+    public static AdminRecords.Record list(byte[] group,long version,long time,List<byte[]> keys,byte[] signer,byte[]... available) {
         var bindings=new ArrayList<AdminBinding>();
         for(byte[] key:keys) {
             byte[] secret=null;for(byte[] candidate:available)if(Crypto.equal(key,Crypto.ed25519Public(candidate))){secret=candidate;break;}

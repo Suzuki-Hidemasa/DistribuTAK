@@ -110,6 +110,7 @@ public final class AdminRecords {
             } else if(kind==Kind.WRAPPED_KEY) {
                 for(int i=0;i<3;i++) Crypto.length(fields[i],32);
                 Crypto.length(fields[3],48); // Noise の psk 32 バイト + GCM tag 16 バイト。
+                if(format==2)Crypto.length(fields[4],32);
             }
             this.payload=payload==null ? canonical() : payload.clone();
             this.signature=signature==null ? null : signature.clone();
@@ -122,12 +123,13 @@ public final class AdminRecords {
                     for(byte[] entry:entries) out.writeByteArray(6,entry);
                     if(hasAdminBindings)for(var binding:bindings)out.writeByteArray(7,binding.encode());
                 } else {
-                    for(int i=0;i<fields.length;i++) out.writeByteArray(6+i,fields[i]);
+                    for(int i=0;i<(kind==Kind.WRAPPED_KEY?4:fields.length);i++) out.writeByteArray(6+i,fields[i]);
                     if(kind==Kind.CERTIFICATE) { out.writeUInt64(9,issuedAt);out.writeUInt64(10,expiresAt); }
                 }
                 if(format==2) {
                     out.writeUInt32(15,2);out.writeByteArray(16,purpose(kind).purpose());
                     if(kind==Kind.CERTIFICATE)out.writeUInt32(17,identityProofFormat);
+                    if(kind==Kind.WRAPPED_KEY)out.writeByteArray(17,fields[4]);
                 }
             });
         }
@@ -246,6 +248,18 @@ public final class AdminRecords {
     static Record wrapped(byte[] group, long version, long signedAt, byte[] recipient, byte[] handshake, byte[] enc, byte[] ciphertext, byte[] adminSecret) {
         return sign(Kind.WRAPPED_KEY,group,version,signedAt,List.of(),new byte[][]{recipient,handshake,enc,ciphertext},0,0,adminSecret);
     }
+    /**
+     * 告知に結んだ形式 2 の包み。
+     * <p>
+     * A format-2 wrapped key bound to an announcement.
+     */
+    public static Record wrapped(byte[] group,long version,long signedAt,byte[] recipient,byte[] handshake,byte[] enc,
+                                  byte[] ciphertext,byte[] adminSecret,byte[] announcementDigest) {
+        var fields=new byte[][]{recipient,handshake,enc,ciphertext,announcementDigest};
+        var unsigned=new Record(Kind.WRAPPED_KEY,group,Crypto.ed25519Public(adminSecret),version,signedAt,List.of(),fields,0,0,null,null,2,2);
+        return new Record(Kind.WRAPPED_KEY,group,unsigned.signer,version,signedAt,List.of(),fields,0,0,unsigned.payload,
+                SignaturePurpose.WRAPPED_KEY.sign(adminSecret,unsigned.payload),2,2);
+    }
     private static void tag(CodedInputStream in, int field, int wire) throws IOException {
         if(in.readTag()!=(field<<3|wire)) throw new IllegalArgumentException("管理記録の項目が不足、重複、または未対応です");
     }
@@ -283,9 +297,10 @@ public final class AdminRecords {
                 if(!in.isAtEnd()){long value=number(in,15);if(value!=2)throw new IllegalArgumentException("未対応の形式です");format=2;}
             }
             if(format!=1) {
-                if(format!=2||kind==Kind.WRAPPED_KEY||!Arrays.equals(bytes(in,16),purpose(kind).purpose()))
+                if(format!=2||!Arrays.equals(bytes(in,16),purpose(kind).purpose()))
                     throw new IllegalArgumentException("管理記録の形式か用途が違います");
                 if(kind==Kind.CERTIFICATE){if(number(in,17)!=2)throw new IllegalArgumentException("未対応の本人証明です");identityProofFormat=2;}
+                if(kind==Kind.WRAPPED_KEY){fields=Arrays.copyOf(fields,5);fields[4]=bytes(in,17);}
             }
             if(!in.isAtEnd()) throw new IllegalArgumentException("管理記録に余分な項目があります");
             var record=new Record(kind,group,signer,version,signedAt,entries,fields,issued,expires,payload,signature,format,identityProofFormat,hasBindings?bindings:null,hasBindings);
