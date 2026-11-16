@@ -39,7 +39,9 @@ public final class ManagementPage {
                 ||entries<0||entries>MAX_ENTRIES||data==null||data.length!=Math.min(PAGE_BYTES,total-index*PAGE_BYTES))throw invalid();
         this.operation=operation.clone();this.group=group.clone();this.digest=digest.clone();this.data=data.clone();
         this.total=total;this.index=index;this.count=count;this.entries=entries;
+        if(!withinKindLimits())throw invalid();
     }
+    boolean withinKindLimits(){return (kind!=Kind.ROSTER&&kind!=Kind.ROSTER_SUMMARY)||(entries<=32&&total<=65536);}
     public Kind kind(){return kind;}
     public byte[] operationId(){return operation.clone();}
     public byte[] group(){return group.clone();}

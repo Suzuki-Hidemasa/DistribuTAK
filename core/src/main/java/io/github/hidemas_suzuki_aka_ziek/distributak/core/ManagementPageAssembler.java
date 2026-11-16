@@ -18,6 +18,7 @@ import java.util.Objects;
  */
 public final class ManagementPageAssembler {
     public static final long PROGRESS_MILLIS=30_000,TOTAL_MILLIS=240_000;
+    public static final int MAX_REMEMBERED=8;
     public enum Status {INCOMPLETE,DUPLICATE,COMPLETE,REJECTED,CORRUPT}
     /**
      * 完成した未検証の全体。署名・権限が有効だという意味は持たない。
@@ -35,7 +36,30 @@ public final class ManagementPageAssembler {
         public int totalEntries(){return first.totalEntries();}
         @Override public String toString(){return "Complete unverified management object";}
     }
-    public record Result(Status status,Completed completed){}
+    /**
+     * ackは配送の確認だけで、記録の署名・権限・適用を保証しない。拒否と破損ではnull。
+     * <p>
+     * The ack confirms delivery only, not signatures, authority or application; null for rejection and corruption.
+     */
+    public record Result(Status status,Completed completed,ManagementPageAck ack){
+        public Result(Status status,Completed completed){this(status,completed,null);}
+    }
+    private static final class Remembered {
+        final DhtId peer;final ManagementPage first;final byte[] session;final long generation,at;
+        Remembered(DhtId peer,Assembly assembly,long now){
+            this.peer=peer;first=assembly.first;session=assembly.session.clone();generation=assembly.generation;at=now;
+        }
+        boolean matches(DhtId peer,ManagementPage page,byte[] session,long generation){
+            return this.peer.equals(peer)&&metadata(first,page)&&this.generation==generation&&Arrays.equals(this.session,session);
+        }
+    }
+    private static boolean sameTarget(ManagementPage first,ManagementPage page){
+        return first.kind()==page.kind()&&Arrays.equals(first.operationId(),page.operationId())&&Arrays.equals(first.objectDigest(),page.objectDigest());
+    }
+    private static boolean metadata(ManagementPage first,ManagementPage page){
+        return sameTarget(first,page)&&first.totalBytes()==page.totalBytes()&&first.pageCount()==page.pageCount()
+                &&first.totalEntries()==page.totalEntries()&&Arrays.equals(first.group(),page.group());
+    }
     private static final class Assembly {
         final ManagementPage first;final byte[] session,buffer;final long generation,started;
         final TransferResources.Lease lease;final boolean[] have;
@@ -57,6 +81,11 @@ public final class ManagementPageAssembler {
     }
     private final byte[] group;private final Clock clock;private final TransferResources resources;
     private final Map<DhtId,Assembly> assemblies=new LinkedHashMap<>();
+    private final java.util.ArrayDeque<Remembered> completed=new java.util.ArrayDeque<>(),retired=new java.util.ArrayDeque<>();
+    private long lastClock=Long.MIN_VALUE;
+    private static void remember(java.util.ArrayDeque<Remembered> records,DhtId peer,Assembly assembly,long now){
+        if(records.size()>=MAX_REMEMBERED)records.removeFirst();records.addLast(new Remembered(peer,assembly,now));
+    }
     public ManagementPageAssembler(byte[] group,Clock clock,TransferResources resources){
         Crypto.length(group,32);this.group=group.clone();this.clock=Objects.requireNonNull(clock);this.resources=Objects.requireNonNull(resources);
     }
@@ -67,8 +96,15 @@ public final class ManagementPageAssembler {
      */
     public synchronized Result receive(byte[] peer,byte[] session,long generation,ManagementPage page){
         Crypto.length(peer,32);Crypto.length(session,16);Objects.requireNonNull(page);poll();
-        if(!Arrays.equals(group,page.group()))return result(Status.REJECTED);
+        if(!Arrays.equals(group,page.group())||!page.withinKindLimits())return result(Status.REJECTED);
         var key=new DhtId(peer);var assembly=assemblies.get(key);long now=clock.millis();
+        if(completed.stream().anyMatch(r->r.matches(key,page,session,generation)))return acknowledged(Status.DUPLICATE,null,page);
+        if(retired.stream().anyMatch(r->r.matches(key,page,session,generation)))return result(Status.REJECTED);
+        if(assembly!=null&&!assembly.matches(page,session,generation)){
+            if(page.pageIndex()!=0||assembly.generation!=generation||!Arrays.equals(assembly.session,session)||sameTarget(assembly.first,page))
+                return result(Status.REJECTED);
+            remember(retired,key,assembly,now);remove(key);assembly=null;
+        }
         if(assembly==null){
             var lease=resources.acquire(key,page.totalBytes());if(lease==null)return result(Status.REJECTED);
             try{assembly=new Assembly(page,session,generation,now,lease);assemblies.put(key,assembly);}
@@ -79,24 +115,33 @@ public final class ManagementPageAssembler {
             for(int i=0;i<data.length;i++)if(assembly.buffer[offset+i]!=data[i]){
                 remove(key);return result(Status.CORRUPT);
             }
-            return result(Status.DUPLICATE);
+            return acknowledged(Status.DUPLICATE,null,page);
         }
         System.arraycopy(data,0,assembly.buffer,offset,data.length);assembly.have[index]=true;assembly.received++;assembly.progress=now;
-        if(assembly.received!=assembly.have.length)return result(Status.INCOMPLETE);
+        if(assembly.received!=assembly.have.length)return acknowledged(Status.INCOMPLETE,null,page);
         remove(key);
         if(!Crypto.equal(ManagementPage.digestOf(assembly.buffer),page.objectDigest()))return result(Status.CORRUPT);
-        return new Result(Status.COMPLETE,new Completed(assembly));
+        remember(completed,key,assembly,now);
+        return acknowledged(Status.COMPLETE,new Completed(assembly),page);
+    }
+    private static Result acknowledged(Status status,Completed completed,ManagementPage page){
+        return new Result(status,completed,new ManagementPageAck(page.group(),page.operationId(),page.objectDigest(),new int[]{page.pageIndex()}));
     }
     private static Result result(Status status){return new Result(status,null);}
     private void remove(DhtId peer){var assembly=assemblies.remove(peer);if(assembly!=null)assembly.lease.close();}
     public synchronized void poll(){
-        long now=clock.millis();var iterator=assemblies.values().iterator();
+        long now=clock.millis();
+        if(now<lastClock){completed.clear();retired.clear();}lastClock=now;
+        completed.removeIf(r->now-r.at>=TOTAL_MILLIS);retired.removeIf(r->now-r.at>=TOTAL_MILLIS);
+        var iterator=assemblies.values().iterator();
         while(iterator.hasNext()){
             var assembly=iterator.next();if(assembly.expired(now)){iterator.remove();assembly.lease.close();}
         }
     }
-    public synchronized void forget(byte[] peer){remove(new DhtId(peer));}
-    public synchronized void clear(){for(var assembly:assemblies.values())assembly.lease.close();assemblies.clear();}
+    public synchronized void forget(byte[] peer){
+        var key=new DhtId(peer);remove(key);completed.removeIf(r->r.peer.equals(key));retired.removeIf(r->r.peer.equals(key));
+    }
+    public synchronized void clear(){for(var assembly:assemblies.values())assembly.lease.close();assemblies.clear();completed.clear();retired.clear();}
     public synchronized int active(){poll();return assemblies.size();}
     @Override public String toString(){return "Management page assembler";}
 }

@@ -67,4 +67,17 @@ class FinalManagementNoticeTest {
         var notice=new FinalManagementNotice(peer(1),GROUP,op(1),record(1),clock,budget,slowPort);
         notice.poll();assertTrue(notice.closed());assertEquals(1,closes);assertEquals(1,frames.size());
     }
+    @Test void aRollbackFromNineHundredToOneHundredClosesExactlyOnce(){
+        var notice=notice(record(1));notice.poll();clock.now=900;notice.poll();clock.now=100;notice.poll();
+        assertTrue(notice.closed());assertEquals(1,closes);notice.receive(new byte[0]);notice.close();assertEquals(1,closes);
+    }
+    @Test void oneTwoAndThreePageNoticesReserveOnlyTheirActualPageCount(){
+        int[] entries={1,25,55};
+        for(int pages=1;pages<=3;pages++){
+            clock.now=pages*1000;frames.clear();assertTrue(budget.tryTake(peer(1),4-pages));
+            var notice=notice(record(entries[pages-1]));notice.poll();assertEquals(pages,frames.size());
+            assertEquals(FinalManagementNotice.Outcome.SENT,notice.outcome());assertFalse(budget.tryTake(peer(1),1));
+            for(int i=2;i<=8;i++)assertTrue(budget.tryTake(peer(i),4));assertFalse(budget.tryTake(peer(9),1));notice.close();
+        }
+    }
 }

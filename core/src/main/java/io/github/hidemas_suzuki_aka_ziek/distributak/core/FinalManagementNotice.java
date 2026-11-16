@@ -8,10 +8,10 @@ import java.util.Objects;
 
 /**
  * 取り消す相手への、署名済み失効一覧の内側だけの一方向送信枠。
- * 作成から1秒で閉じるため、所有側はpollを定期的に呼ぶ。失効の適用や通常の切断は待たせない。
+ * 同じスレッドから呼ぶ。作成から1秒で閉じるため、所有側はpollを定期的に呼ぶ。失効の適用や通常の切断は待たせない。
  * <p>
  * A one-way sending slot only for the inner signed revocation list addressed to a revoked peer.
- * The owner polls periodically to close it one second after creation, without delaying revocation or normal disconnection.
+ * Call on one thread. The owner polls periodically to close it one second after creation, without delaying revocation or normal disconnection.
  */
 public final class FinalManagementNotice implements AutoCloseable {
     /**
@@ -33,6 +33,7 @@ public final class FinalManagementNotice implements AutoCloseable {
     private final Clock clock;
     private final ManagementSendBudget budget;
     private final long started;
+    private long lastClock;
     private Port port;
     private List<ManagementPage> pages;
     private boolean attempted,closed;
@@ -42,14 +43,14 @@ public final class FinalManagementNotice implements AutoCloseable {
         if(record.kind()!=AdminRecords.Kind.REVOCATIONS||!Arrays.equals(group,record.group())||!record.hasValidSignature())
             throw new IllegalArgumentException("Invalid final notice");
         this.peer=peer.clone();this.clock=Objects.requireNonNull(clock);this.budget=Objects.requireNonNull(budget);
-        this.port=Objects.requireNonNull(port);started=clock.millis();
+        this.port=Objects.requireNonNull(port);started=clock.millis();lastClock=started;
         byte[] inner=record.encode();
         pages=inner.length<=4096?ManagementPage.split(ManagementPage.Kind.REVOCATION,operation,group,inner,record.entries().size()):List.of();
     }
-    private void expire(){long now=clock.millis();if(now<started||now-started>=1000)close();}
+    private void expire(){long now=clock.millis();if(now<lastClock||now-started>=1000)close();lastClock=now;}
     public void poll(){
         expire();if(closed||attempted)return;attempted=true;
-        if(pages.isEmpty()||!budget.tryTake(peer,4))return;
+        if(pages.isEmpty()||!budget.tryTake(peer,pages.size()))return;
         boolean all=true;
         for(var page:pages){
             expire();if(closed){all=false;break;}

@@ -20,6 +20,7 @@ class ManagedTransfersTest {
     final List<ManagedTransferResult> results=new ArrayList<>();
     ManagedTransferResult answer=ManagedTransferResult.ACCEPTED;
     boolean fail;
+    final List<DhtWire.TransferKind> completionKinds=new ArrayList<>();
     final DhtTransfers receiver=new DhtTransfers(GROUP,(p,s,d)->{acks.add(d);return true;},now::get,new Random(1),
             (p,k,d)->legacy.add(d),(p,r)->true,DhtTransfers.Limits.defaults(),resources,new ManagedTransferSink(){
         public ManagedTransferResult accept(ManagedTransferContext context,ManagedDhtRecord record){
@@ -27,7 +28,8 @@ class ManagedTransfersTest {
             contexts.add(context);assertEquals(record.key(),context.key());
             if(fail)throw new IllegalStateException("Sink failed");return answer;
         }
-        public void completed(DhtId p,byte[] r,ManagedTransferResult result){
+        public void completed(DhtId p,byte[] s,long generation,DhtWire.TransferKind kind,byte[] r,ManagedTransferResult result){
+            assertArrayEquals(session,s);assertEquals(9,generation);completionKinds.add(kind);
             assertEquals(peer,p);assertArrayEquals(request,r);results.add(result);
         }
     });
@@ -83,5 +85,15 @@ class ManagedTransfersTest {
         assertEquals(5,contexts.size());assertTrue(legacy.isEmpty());
         receiver.clear();deliver(DiscoveryRecordTest.record(1,1,NOW).encode());
         assertEquals(5,contexts.size());assertEquals(ManagedTransferResult.REJECTED,results.get(results.size()-1));
+    }
+    @Test void storeAndValueAreDistinguishedInTheContextAndCompletionNotification(){
+        var data=revocationRecord(1,1,1,NOW,0).encode();
+        for(var kind:DhtWire.TransferKind.values()){
+            receiver.clear();acks.clear();
+            var message=DhtWire.parse(DhtWire.transfer(GROUP,kind,request,DhtTransfers.digestOf(data),data.length,0,1,data));
+            receiver.receive(peer,session,9,message);
+            assertEquals(kind,contexts.get(contexts.size()-1).kind());
+            assertEquals(kind,completionKinds.get(completionKinds.size()-1));
+        }
     }
 }

@@ -54,7 +54,7 @@ class ManagementPageAssemblerTest {
         var all=pages(2050);var p=all.get(1);assertEquals(INCOMPLETE,receive(all.get(0)).status());
         var other=ManagementPageTest.bytes(32,9);
         for(var changed:List.of(
-                change(p,ManagementPage.Kind.ROSTER,p.operationId(),group,p.objectDigest(),2050,1,3,p.data(),65536),
+                change(p,ManagementPage.Kind.ROSTER,p.operationId(),group,p.objectDigest(),2050,1,3,p.data(),32),
                 change(p,p.kind(),ManagementPageTest.bytes(16,9),group,p.objectDigest(),2050,1,3,p.data(),65536),
                 change(p,p.kind(),p.operationId(),other,p.objectDigest(),2050,1,3,p.data(),65536),
                 change(p,p.kind(),p.operationId(),group,other,2050,1,3,p.data(),65536),

@@ -10,11 +10,14 @@ public final class ManagedTransferContext {
     private final DhtId peer,key;
     private final byte[] session,request;
     private final long generation;
-    public ManagedTransferContext(DhtId peer,byte[] session,long generation,byte[] request,DhtId key) {
+    private final DhtWire.TransferKind kind;
+    public ManagedTransferContext(DhtId peer,byte[] session,long generation,byte[] request,DhtId key,DhtWire.TransferKind kind) {
+        this.kind=java.util.Objects.requireNonNull(kind);
         this.peer=java.util.Objects.requireNonNull(peer);this.key=java.util.Objects.requireNonNull(key);
         if(session==null||session.length!=16||request==null||request.length!=16)throw new IllegalArgumentException("Invalid transfer context");
         this.session=session.clone();this.request=request.clone();this.generation=generation;
     }
+    public DhtWire.TransferKind kind(){return kind;}
     public DhtId peer(){return peer;}
     public DhtId key(){return key;}
     public long generation(){return generation;}

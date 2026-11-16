@@ -10,9 +10,9 @@ package io.github.hidemas_suzuki_aka_ziek.distributak.core.dht;
 public interface ManagedTransferSink {
     ManagedTransferResult accept(ManagedTransferContext context,ManagedDhtRecord record);
     /**
-     * 全体の結果だけを通知する。STORE_RESULT の送信は呼び出し側が後で行う。
+     * 種類・セッション・世代と全体の結果を通知する。STORE_RESULT の送信は呼び出し側が後で行う。
      * <p>
-     * Reports only the whole-record result; the caller sends STORE_RESULT separately later.
+     * Reports the kind, session, generation and whole-record result; the caller sends STORE_RESULT separately later.
      */
-    default void completed(DhtId peer,byte[] request,ManagedTransferResult result) {}
+    default void completed(DhtId peer,byte[] session,long generation,DhtWire.TransferKind kind,byte[] request,ManagedTransferResult result) {}
 }

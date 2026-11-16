@@ -222,6 +222,11 @@ public final class DhtTransfers {
 
     public int activeOut(){return outs.size();}
     public int activeIn(){return ins.size();}
+    /**
+     * この DhtTransfers の分だけの受信予約バイト数。共有枠の総量ではない。
+     * <p>
+     * Receive reservation bytes owned only by this DhtTransfers, rather than the shared pool total.
+     */
     public long reservedBytes(){return reserved;}
     public long completedIn(){return completedIn;}
     public long completedOut(){return completedOut;}
@@ -376,7 +381,7 @@ public final class DhtTransfers {
             ManagedDhtRecord record;
             try{record=ManagedDhtRecord.verifyStructure(in.buffer,group);}
             catch(RuntimeException invalid){notifyManaged(in,ManagedTransferResult.REJECTED);return;}
-            var context=new ManagedTransferContext(in.peer,in.session,in.generation,in.id,record.key());
+            var context=new ManagedTransferContext(in.peer,in.session,in.generation,in.id,record.key(),in.kind);
             try{result=Objects.requireNonNull(managedSink.accept(context,record));}
             catch(RuntimeException failed){result=ManagedTransferResult.FAILED;}
             notifyManaged(in,result);return;
@@ -384,7 +389,7 @@ public final class DhtTransfers {
         try{sink.accept(in.peer,in.kind,in.buffer);}catch(RuntimeException ignored){/* 渡し先の失敗は転送の結果に影響しない */}
     }
     private void notifyManaged(In in,ManagedTransferResult result) {
-        try{managedSink.completed(in.peer,in.id.clone(),result);}
+        try{managedSink.completed(in.peer,in.session.clone(),in.generation,in.kind,in.id.clone(),result);}
         catch(RuntimeException ignored){
             // 通知の失敗でも、解放済みの受信枠と配送 ACK は戻さない。
             // A failed notification does not restore released receive resources or undo delivery ACKs.

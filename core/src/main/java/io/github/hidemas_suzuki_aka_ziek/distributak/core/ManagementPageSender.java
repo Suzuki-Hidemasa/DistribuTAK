@@ -61,7 +61,7 @@ public final class ManagementPageSender {
         DhtId key=new DhtId(peer);
         if(all().stream().anyMatch(o->o.peer.equals(key)&&o.pages.get(0).kind()==kind))return Offer.PEER_BUSY;
         Set<DhtId> queued=queuedPeers();
-        if(!isActive(key)&&!queued.contains(key)&&queued.size()>=32)return Offer.FULL;
+        if(!isActive(key)&&!queued.contains(key)&&queued.size()>=32)return queued.size()>32?Offer.BUSY:Offer.FULL;
         if(held+data.length>MAX_HELD_BYTES)return Offer.BUSY;
         var pages=ManagementPage.split(kind,operation,group,data,entries);
         pending.add(new Out(peer,session,generation,pages,notice,clock.millis()));held+=data.length;return Offer.ACCEPTED;
@@ -75,7 +75,7 @@ public final class ManagementPageSender {
         active.remove(o);pending.remove(o);held-=o.bytes();if(success)completed++;else failed++;
     }
     private void promoteSamePeer(DhtId peer,long now){
-        var next=pending.stream().filter(o->o.peer.equals(peer)).min(Comparator.comparingInt(Out::rank)).orElse(null);
+        var next=pending.stream().filter(o->o.peer.equals(peer)&&!o.blocked(rotating)).min(Comparator.comparingInt(Out::rank)).orElse(null);
         if(next!=null){pending.remove(next);next.activate(now);active.add(next);}
     }
     public void poll(){
@@ -137,7 +137,10 @@ public final class ManagementPageSender {
         Crypto.length(session,16);if(!Arrays.equals(group,ack.group())||!budget.tryTake(peer,1))return false;
         try{return sender.send(peer.clone(),session.clone(),ack.envelope());}catch(RuntimeException failed){return false;}
     }
-    public void rotating(boolean value){rotating=value;}
+    public void rotating(boolean value){
+        rotating=value;
+        for(var o:new ArrayList<>(active))if(o.blocked(rotating)){active.remove(o);pending.add(o);}
+    }
     public int active(){return active.size();}
     public int pendingPeers(){return queuedPeers().size();}
     public long completed(){return completed;}
