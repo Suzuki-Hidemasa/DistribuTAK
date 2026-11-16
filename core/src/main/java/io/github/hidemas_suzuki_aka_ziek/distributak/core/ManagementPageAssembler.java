@@ -109,7 +109,7 @@ public final class ManagementPageAssembler {
         Crypto.length(peer,32);Crypto.length(session,16);Objects.requireNonNull(page);poll();
         if(!Arrays.equals(group,page.group())||!page.withinKindLimits())return result(Status.REJECTED);
         var key=new DhtId(peer);var assembly=assemblies.get(key);long now=clock.millis();
-        if(completed.stream().anyMatch(r->r.matches(key,page,session,generation)))return acknowledged(Status.DUPLICATE,null,page);
+        if(completed.stream().anyMatch(r->r.matches(key,page,session,generation)))return acknowledged(Status.DUPLICATE,null,page,true);
         if(retired.stream().anyMatch(r->r.matches(key,page,session,generation)))return result(Status.REJECTED);
         if(assembly!=null&&!assembly.matches(page,session,generation)){
             if(page.pageIndex()!=0||assembly.generation!=generation||!Arrays.equals(assembly.session,session)||sameTarget(assembly.first,page))
@@ -129,17 +129,17 @@ public final class ManagementPageAssembler {
             // 一致する重複も進捗に数えるが、組立を作った時刻は変えない。
             // Count matching duplicates as progress without changing the assembly creation time.
             assembly.progress=now;
-            return acknowledged(Status.DUPLICATE,null,page);
+            return acknowledged(Status.DUPLICATE,null,page,false);
         }
         System.arraycopy(data,0,assembly.buffer,offset,data.length);assembly.have[index]=true;assembly.received++;assembly.progress=now;
-        if(assembly.received!=assembly.have.length)return acknowledged(Status.INCOMPLETE,null,page);
+        if(assembly.received!=assembly.have.length)return acknowledged(Status.INCOMPLETE,null,page,false);
         remove(key);
         if(!Crypto.equal(ManagementPage.digestOf(assembly.buffer),page.objectDigest()))return result(Status.CORRUPT);
         remember(completed,key,assembly,now);
-        return acknowledged(Status.COMPLETE,new Completed(assembly),page);
+        return acknowledged(Status.COMPLETE,new Completed(assembly),page,true);
     }
-    private static Result acknowledged(Status status,Completed completed,ManagementPage page){
-        return new Result(status,completed,new ManagementPageAck(page.group(),page.operationId(),page.objectDigest(),new int[]{page.pageIndex()}));
+    private static Result acknowledged(Status status,Completed completed,ManagementPage page,boolean complete){
+        return new Result(status,completed,new ManagementPageAck(page.group(),page.operationId(),page.objectDigest(),new int[]{page.pageIndex()},complete));
     }
     private static Result result(Status status){return new Result(status,null);}
     private void remove(DhtId peer){var assembly=assemblies.remove(peer);if(assembly!=null)assembly.lease.close();}

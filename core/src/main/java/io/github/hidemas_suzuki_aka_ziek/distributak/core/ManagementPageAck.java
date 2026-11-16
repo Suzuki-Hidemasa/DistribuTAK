@@ -15,22 +15,24 @@ public final class ManagementPageAck {
     public static final int ENVELOPE_FIELD=11,MAX_INDICES=4;
     private final byte[] group,operation,digest;
     private final int[] indices;
-    public ManagementPageAck(byte[] group,byte[] operation,byte[] digest,int[] indices){
+    private final boolean complete;
+    public ManagementPageAck(byte[] group,byte[] operation,byte[] digest,int[] indices,boolean complete){
         Crypto.length(group,32);Crypto.length(operation,16);Crypto.length(digest,32);
         if(indices==null||indices.length<1||indices.length>MAX_INDICES)throw invalid();
         int previous=-1;
         for(int index:indices){if(index<=previous||index>=ManagementPage.MAX_PAGES)throw invalid();previous=index;}
-        this.group=group.clone();this.operation=operation.clone();this.digest=digest.clone();this.indices=indices.clone();
+        this.group=group.clone();this.operation=operation.clone();this.digest=digest.clone();this.indices=indices.clone();this.complete=complete;
     }
     public byte[] group(){return group.clone();}
     public byte[] operationId(){return operation.clone();}
     public byte[] objectDigest(){return digest.clone();}
     public int[] pageIndices(){return indices.clone();}
+    public boolean complete(){return complete;}
     public byte[] encode(){
         return write(out->{
             out.writeUInt32(1,1);out.writeByteArray(2,group);out.writeByteArray(3,operation);out.writeByteArray(4,digest);
             byte[] packed=write(values->{for(int index:indices)values.writeUInt32NoTag(index);});
-            out.writeByteArray(5,packed);
+            out.writeByteArray(5,packed);out.writeUInt32(6,complete?1:0);
         });
     }
     public byte[] envelope(){return wrap(ENVELOPE_FIELD,encode());}
@@ -44,8 +46,9 @@ public final class ManagementPageAck {
                 if(size==MAX_INDICES)throw invalid();long index=packed.readUInt64();
                 if(index<0||index>=ManagementPage.MAX_PAGES)throw invalid();indices[size++]=(int)index;
             }
+            boolean complete=number(in,6,1)==1;
             if(!in.isAtEnd())throw invalid();
-            var result=new ManagementPageAck(group,operation,digest,Arrays.copyOf(indices,size));
+            var result=new ManagementPageAck(group,operation,digest,Arrays.copyOf(indices,size),complete);
             if(!Arrays.equals(wire,result.encode()))throw invalid();return result;
         }catch(IOException malformed){throw invalid();}
     }

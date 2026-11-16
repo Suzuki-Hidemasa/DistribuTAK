@@ -85,15 +85,15 @@ class ManagementPageTest {
         assertThrows(IllegalArgumentException.class,()->ManagementPage.decodeEnvelope(wire(out->{out.writeUInt32(1,3);out.writeByteArray(10,mixed);})));
     }
     @Test void ackIsCanonicalPackedAndContainsOneToFourSortedDistinctIndices()throws Exception {
-        var ack=new ManagementPageAck(bytes(32,1),bytes(16,2),bytes(32,3),new int[]{0,127,128,3071});
+        var ack=new ManagementPageAck(bytes(32,1),bytes(16,2),bytes(32,3),new int[]{0,127,128,3071},false);
         assertArrayEquals(ack.encode(),ManagementPageAck.decode(ack.encode()).encode());
         assertArrayEquals(ack.envelope(),ManagementPageAck.decodeEnvelope(ack.envelope()).envelope());
         assertEquals(11,SyncSchema.SyncEnvelope.parseFrom(ack.envelope()).getManagement().getBodyCase().getNumber());
         for(int[] bad:new int[][]{{},{0,1,2,3,4},{0,0},{2,1},{-1},{3072}})
-            assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[32],new byte[16],new byte[32],bad));
-        assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[31],new byte[16],new byte[32],new int[]{0}));
-        assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[32],new byte[15],new byte[32],new int[]{0}));
-        assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[32],new byte[16],new byte[31],new int[]{0}));
+            assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[32],new byte[16],new byte[32],bad,false));
+        assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[31],new byte[16],new byte[32],new int[]{0},false));
+        assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[32],new byte[15],new byte[32],new int[]{0},false));
+        assertThrows(IllegalArgumentException.class,()->new ManagementPageAck(new byte[32],new byte[16],new byte[31],new int[]{0},false));
         assertThrows(IllegalArgumentException.class,()->ManagementPageAck.decode(Crypto.concat(ack.encode(),new byte[]{48,0})));
         var unpacked=wire(out->{out.writeUInt32(1,1);out.writeByteArray(2,new byte[32]);out.writeByteArray(3,new byte[16]);out.writeByteArray(4,new byte[32]);out.writeUInt32(5,0);});
         assertThrows(IllegalArgumentException.class,()->ManagementPageAck.decode(unpacked));
@@ -102,7 +102,7 @@ class ManagementPageTest {
     @Test void byteArraysAreDefensivelyCopiedAndStringsRevealNoContents() {
         var p=page();byte[] encoded=p.encode();p.data()[0]^=1;p.operationId()[0]^=1;p.group()[0]^=1;p.objectDigest()[0]^=1;
         assertArrayEquals(encoded,p.encode());assertEquals("Management page",p.toString());
-        int[] indices={0};var ack=new ManagementPageAck(new byte[32],new byte[16],new byte[32],indices);
+        int[] indices={0};var ack=new ManagementPageAck(new byte[32],new byte[16],new byte[32],indices,false);
         indices[0]=5;ack.pageIndices()[0]=4;assertArrayEquals(new int[]{0},ack.pageIndices());
         assertEquals("Management page acknowledgement",ack.toString());
     }
@@ -112,7 +112,7 @@ class ManagementPageTest {
             assertThrows(IllegalArgumentException.class,()->RenewalMessage.decode(p.envelope()));
             assertThrows(IllegalArgumentException.class,()->AdminControl.decode(p.envelope()));
         }
-        var ack=new ManagementPageAck(new byte[32],new byte[16],new byte[32],new int[]{0});
+        var ack=new ManagementPageAck(new byte[32],new byte[16],new byte[32],new int[]{0},false);
         assertThrows(IllegalArgumentException.class,()->RenewalMessage.decode(ack.envelope()));
         assertThrows(IllegalArgumentException.class,()->AdminControl.decode(ack.envelope()));
     }

@@ -20,7 +20,7 @@ class ManagementReviewFixTest {
     ManagementPageAssembler.Result receive(ManagementPage page){return assembler.receive(peer(1),SESSION,1,page);}
     void offer(ManagementPage.Kind kind,int operation,int bytes){assertEquals(ManagementPageSender.Offer.ACCEPTED,
             sender.offer(peer(1),SESSION,1,kind,op(operation),new byte[bytes],0,false));}
-    void ack(ManagementPage page){sender.acknowledge(peer(1),SESSION,1,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()}));}
+    void ack(ManagementPage page){sender.acknowledge(peer(1),SESSION,1,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()},page.pageIndex()==page.pageCount()-1));}
     void assertRejectedWithoutAck(ManagementPageAssembler.Result result){
         assertEquals(REJECTED,result.status());assertNull(result.ack());assertNull(result.completed());
     }
@@ -80,10 +80,69 @@ class ManagementReviewFixTest {
         clock.now=61000;sender.poll();assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());
         assertEquals(0,resources.active());
     }
-    @Test void evictingEightRetiredTargetsCanAgainCompleteOnlyAtTheSender(){
+    @Test void evictingEightRetiredTargetsNeverCompleteAtTheSender(){
         delayedAckAfterExpiry(1);
-        assertEquals(1,sender.completed());assertEquals(0,receiverCompleted);assertEquals(0,sender.failed());
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(0,sender.failed());
         assertEquals(1,assembler.active());assertEquals(2048,resources.reservedBytes());
+        clock.now+=30000;sender.poll();assertEquals(1,sender.failed());
+        assertEquals(0,assembler.active());assertEquals(0,resources.reservedBytes());
+    }
+    @Test void receiverMarksOnlyCompleteObjectsAndRememberedCompletions(){
+        var all=pages(1,2048);
+        var first=receive(all.get(0));assertEquals(INCOMPLETE,first.status());assertFalse(first.ack().complete());
+        var duplicate=receive(all.get(0));assertEquals(DUPLICATE,duplicate.status());assertFalse(duplicate.ack().complete());
+        var complete=receive(all.get(1));assertEquals(COMPLETE,complete.status());assertTrue(complete.ack().complete());
+        var remembered=receive(all.get(0));assertEquals(DUPLICATE,remembered.status());assertTrue(remembered.ack().complete());
+        for(int i=2;i<=9;i++)assertTrue(receive(pages(i,1).get(0)).ack().complete());
+        var evicted=receive(all.get(1));assertEquals(INCOMPLETE,evicted.status());assertFalse(evicted.ack().complete());
+        assertRejectedWithoutAck(assembler.receive(peer(1),SESSION,2,all.get(0)));
+    }
+    @Test void lostCompletionAckIsRecoveredByARetryAndRememberedCompletion(){
+        offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();
+        var first=receive(sent.get(0));sender.acknowledge(peer(1),SESSION,1,first.ack());
+        var last=receive(sent.get(1));assertEquals(COMPLETE,last.status());assertTrue(last.ack().complete());
+        assertEquals(0,sender.completed());assertEquals(0,resources.active());
+        clock.now=999;sender.poll();assertEquals(2,sent.size());
+        clock.now=1000;sender.poll();assertEquals(3,sent.size());assertEquals(1,sent.get(2).pageIndex());
+        var retry=receive(sent.get(2));assertEquals(DUPLICATE,retry.status());assertNull(retry.completed());assertTrue(retry.ack().complete());
+        sender.acknowledge(peer(1),SESSION,1,retry.ack());assertEquals(1,sender.completed());assertEquals(0,sender.failed());
+    }
+    @Test void samePeerEvictionAtSeventySecondsNeverCompletesAtTheSender(){evictionProbe(false,false);}
+    @Test void globalEvictionAtOneHundredThreeSecondsNeverCompletesAtTheSender(){evictionProbe(true,false);}
+    @Test void globalEvictionWithoutPauseAtFiftyOneSecondsNeverCompletesAtTheSender(){evictionProbe(true,true);}
+    void evictionProbe(boolean global,boolean noPause){
+        offer(ManagementPage.Kind.ROSTER,1,2048);
+        if(noPause)assertTrue(budget.tryTake(peer(1),3));
+        sender.poll();var oldAck=receive(sent.get(0)).ack();assertNotNull(oldAck);
+        if(noPause){
+            for(int second=1;second<=30;second++){
+                clock.now=second*1000;assertTrue(budget.tryTake(peer(1),4));
+                if(second==29)sender.acknowledge(peer(1),SESSION,1,oldAck);
+                sender.poll();assembler.poll();
+            }
+        }else sender.rotating(true);
+        clock.now=31000;assembler.poll();
+        for(int peerId=global?2:1;peerId<=(global?9:1);peerId++){
+            for(int n=0;n<9;n++){
+                clock.now+=noPause?250:1000;
+                var page=ManagementPage.split(ManagementPage.Kind.ROSTER,op(10+n),GROUP,new byte[2048],0).get(0);
+                assertEquals(INCOMPLETE,assembler.receive(peer(peerId),SESSION,1,page).status());
+            }
+            if(global){
+                if(noPause)clock.now+=250;
+                var tail=ManagementPage.split(ManagementPage.Kind.ROSTER,op(18),GROUP,new byte[2048],0).get(1);
+                assertEquals(COMPLETE,assembler.receive(peer(peerId),SESSION,1,tail).status());
+            }else{clock.now+=30000;assembler.poll();}
+        }
+        assertEquals(noPause?51000:global?103000:70000,clock.now);
+        int tailIndex=1;
+        if(!noPause){tailIndex=sent.size()+1;sender.rotating(false);}
+        sender.poll();var result=receive(sent.get(tailIndex));
+        assertEquals(INCOMPLETE,result.status());assertNull(result.completed());
+        sender.acknowledge(peer(1),SESSION,1,result.ack());
+        if(!noPause)sender.acknowledge(peer(1),SESSION,1,oldAck);
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(0,sender.failed());
+        clock.now+=30000;sender.poll();assertEquals(1,sender.failed());assertEquals(0,sender.completed());
     }
     @Test void anotherPeerCannotEvictAnExpiredRosterAndCompleteOnlyAtTheSender(){
         delayedAckAfterExpiry(2);
@@ -279,8 +338,10 @@ class ManagementReviewFixTest {
         clock.now=5000;sender.poll();drain(false);
         assertEquals(1,sender.completed());assertEquals(1,receiverCompleted);assertEquals(0,sender.failed());
         offer(ManagementPage.Kind.ROSTER,3,2048);sender.poll();sender.rotating(true);
-        clock.now=275000;sender.rotating(false);sender.poll();
-        assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());
+        clock.now=244999;sender.rotating(false);sender.poll();
+        assertEquals(0,sender.failed());assertEquals(1,sender.active());assertEquals(2048,sender.heldBytes());
+        clock.now=245000;sender.poll();
+        assertEquals(1,sender.failed());assertEquals(0,sender.active());assertEquals(0,sender.heldBytes());
     }
     @Test void aFailedObjectIsReplacedAtFourSecondsAndOldFirstPagesCannotBounceBack(){
         offer(ManagementPage.Kind.REVOCATION,1,2048);offer(ManagementPage.Kind.ANNOUNCEMENT,2,2048);

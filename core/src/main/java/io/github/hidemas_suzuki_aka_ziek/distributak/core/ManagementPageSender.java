@@ -28,7 +28,7 @@ public final class ManagementPageSender {
         final DhtId peer;final byte[] session;final long generation,offered;
         final List<ManagementPage> pages;final boolean notice;
         final boolean[] acked,sent,ever;final int[] retries;final long[] sentAt;
-        long started,progress;int round,ackCount;
+        long started,progress;int round;
         Out(byte[] peer,byte[] session,long generation,List<ManagementPage> pages,boolean notice,long now){
             this.peer=new DhtId(peer);this.session=session.clone();this.generation=generation;this.pages=pages;this.notice=notice;offered=now;
             int n=pages.size();acked=new boolean[n];sent=new boolean[n];ever=new boolean[n];retries=new int[n];sentAt=new long[n];
@@ -39,7 +39,7 @@ public final class ManagementPageSender {
         void activate(long now){started=now;progress=now;}
         void resetForResume(){
             Arrays.fill(acked,false);Arrays.fill(sent,false);Arrays.fill(ever,false);
-            Arrays.fill(retries,0);Arrays.fill(sentAt,0);ackCount=0;round=0;started=0;progress=0;
+            Arrays.fill(retries,0);Arrays.fill(sentAt,0);round=0;started=0;progress=0;
         }
     }
     private final byte[] group;
@@ -134,8 +134,12 @@ public final class ManagementPageSender {
         if(!Arrays.equals(first.operationId(),ack.operationId())||!Arrays.equals(first.objectDigest(),ack.objectDigest()))return;
         if(now<last||now-out.offered>=TOTAL_MS||now-out.progress>=PROGRESS_MS)return;
         for(int i:ack.pageIndices())if(i>=out.pages.size())return;
-        for(int i:ack.pageIndices())if(out.ever[i]&&!out.acked[i]){out.acked[i]=true;out.ackCount++;out.progress=now;}
-        if(out.ackCount==out.pages.size()){remove(out,true);promoteSamePeer(out.peer,now);}
+        boolean sentIndex=false;
+        for(int i:ack.pageIndices())if(out.ever[i]){
+            sentIndex=true;
+            if(!out.acked[i]){out.acked[i]=true;out.progress=now;}
+        }
+        if(ack.complete()&&sentIndex){remove(out,true);promoteSamePeer(out.peer,now);}
     }
     public boolean sendAck(byte[] peer,byte[] session,ManagementPageAck ack){
         Crypto.length(session,16);if(!Arrays.equals(group,ack.group())||!budget.tryTake(peer,1))return false;

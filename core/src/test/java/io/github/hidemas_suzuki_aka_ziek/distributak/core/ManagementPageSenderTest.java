@@ -31,7 +31,7 @@ class ManagementPageSenderTest {
     }
     void ack(Frame frame,long generation){
         var page=ManagementPage.decodeEnvelope(frame.data());
-        sender.acknowledge(frame.peer(),SESSION,generation,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()}));
+        sender.acknowledge(frame.peer(),SESSION,generation,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()},page.pageIndex()==page.pageCount()-1));
     }
     @Test void slidingBudgetReservesAtomicallyAndCountsTheExactOneSecondBoundary(){
         assertTrue(budget.tryTake(peer(1),3));assertFalse(budget.tryTake(peer(1),2));assertTrue(budget.tryTake(peer(1),1));
@@ -50,7 +50,7 @@ class ManagementPageSenderTest {
     }
     @Test void acknowledgementUsesTheSendingEndpointsOwnBudget(){
         var page=ManagementPage.split(ManagementPage.Kind.ROSTER,op(1),GROUP,new byte[1024],1).get(0);
-        var ack=new ManagementPageAck(GROUP,op(1),page.objectDigest(),new int[]{0});
+        var ack=new ManagementPageAck(GROUP,op(1),page.objectDigest(),new int[]{0},page.pageIndex()==page.pageCount()-1);
         assertTrue(sender.sendAck(peer(1),SESSION,ack));
         offer(1,2,ManagementPage.Kind.REVOCATION,4096,0,false);sender.poll();assertEquals(4,frames.size());
         assertFalse(sender.sendAck(peer(1),SESSION,ack));
@@ -127,4 +127,58 @@ class ManagementPageSenderTest {
         assertEquals(ManagementPageSender.Offer.BUSY,offer(18,18,ManagementPage.Kind.REVOCATION,480*1024,0,false));
         clock.now=240000;sender.poll();assertEquals(0,sender.heldBytes());assertTrue(frames.isEmpty());
     }
+    ManagementPageAck progressAck(ManagementPage page,int[] indices,boolean complete){
+        return new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),indices,complete);
+    }
+    @Test void allPageProgressAcksWaitForCompletionAndFailAtThirtySeconds(){
+        offer(1,1,ManagementPage.Kind.ROSTER,2048,0,false);sender.poll();
+        var first=ManagementPage.decodeEnvelope(frames.get(0).data());
+        sender.acknowledge(peer(1),SESSION,7,progressAck(first,new int[]{0,1},false));
+        assertEquals(0,sender.completed());assertEquals(1,sender.active());
+        clock.now=29999;sender.poll();assertEquals(0,sender.failed());assertEquals(2,frames.size());
+        sender.acknowledge(peer(1),SESSION,7,progressAck(first,new int[]{0,1},false));
+        clock.now=30000;sender.poll();assertEquals(1,sender.failed());assertEquals(0,sender.completed());
+    }
+    @Test void completionAckCanFinishAfterAllProgressAcks(){
+        offer(1,1,ManagementPage.Kind.ROSTER,2048,0,false);sender.poll();
+        var first=ManagementPage.decodeEnvelope(frames.get(0).data());
+        sender.acknowledge(peer(1),SESSION,7,progressAck(first,new int[]{0,1},false));
+        sender.acknowledge(peer(1),SESSION,7,progressAck(first,new int[]{0},true));
+        assertEquals(1,sender.completed());assertEquals(0,sender.heldBytes());
+    }
+    @Test void completionAckRequiresMatchingContextAndAtLeastOneSentIndex(){
+        offer(1,1,ManagementPage.Kind.ROSTER,8192,0,false);sender.poll();
+        var first=ManagementPage.decodeEnvelope(frames.get(0).data());
+        var valid=progressAck(first,new int[]{0},true);
+        sender.acknowledge(peer(1),SESSION,7,progressAck(first,new int[]{4},true));
+        sender.acknowledge(peer(1),SESSION,7,new ManagementPageAck(GROUP,op(2),first.objectDigest(),new int[]{0},true));
+        sender.acknowledge(peer(1),SESSION,7,new ManagementPageAck(GROUP,op(1),peer(9),new int[]{0},true));
+        sender.acknowledge(peer(1),SESSION,7,new ManagementPageAck(peer(9),op(1),first.objectDigest(),new int[]{0},true));
+        sender.acknowledge(peer(2),SESSION,7,valid);sender.acknowledge(peer(1),op(2),7,valid);
+        sender.acknowledge(peer(1),SESSION,8,valid);
+        assertEquals(0,sender.completed());assertEquals(1,sender.active());
+        sender.acknowledge(peer(1),SESSION,7,progressAck(first,new int[]{0,4},true));assertEquals(1,sender.completed());
+    }
+    @Test void resumedCompletionAckWaitsUntilItsPageHasBeenSentAgain(){
+        offer(1,1,ManagementPage.Kind.ROSTER,8192,0,false);sender.poll();
+        var first=ManagementPage.decodeEnvelope(frames.get(0).data());
+        var delayed=progressAck(first,new int[]{3},true);
+        sender.rotating(true);sender.acknowledge(peer(1),SESSION,7,delayed);sender.rotating(false);
+        sender.acknowledge(peer(1),SESSION,7,delayed);assertEquals(0,sender.completed());
+        clock.now=1000;assertTrue(budget.tryTake(peer(1),3));sender.poll();
+        sender.acknowledge(peer(1),SESSION,7,delayed);assertEquals(0,sender.completed());
+        clock.now=2000;sender.poll();sender.acknowledge(peer(1),SESSION,7,delayed);assertEquals(1,sender.completed());
+    }
+    @Test void completionAckAtProgressOrTotalDeadlineCannotComplete(){
+        offer(1,1,ManagementPage.Kind.ROSTER,2048,0,false);sender.poll();
+        var first=ManagementPage.decodeEnvelope(frames.get(0).data());
+        clock.now=30000;sender.acknowledge(peer(1),SESSION,7,progressAck(first,new int[]{0},true));
+        assertEquals(0,sender.completed());sender.poll();assertEquals(1,sender.failed());
+        clock.now=31000;offer(1,2,ManagementPage.Kind.ROSTER,2048,0,false);sender.poll();sender.rotating(true);
+        clock.now=270999;sender.rotating(false);sender.poll();
+        var resumed=ManagementPage.decodeEnvelope(frames.get(frames.size()-1).data());
+        clock.now=271000;sender.acknowledge(peer(1),SESSION,7,progressAck(resumed,new int[]{0},true));
+        assertEquals(0,sender.completed());sender.poll();assertEquals(2,sender.failed());
+    }
+
 }

@@ -46,7 +46,7 @@ class ManagementPageAssemblerTest {
         var p=pages(2050).get(0);assertEquals(INCOMPLETE,receive(p).status());
         byte[] different=p.data();different[0]^=1;
         var conflict=change(p,p.kind(),p.operationId(),p.group(),p.objectDigest(),p.totalBytes(),0,p.pageCount(),different,p.totalEntries());
-        assertEquals(CORRUPT,receive(conflict).status());assertEquals(0,assembler.active());
+        var corrupt=receive(conflict);assertEquals(CORRUPT,corrupt.status());assertNull(corrupt.ack());assertEquals(0,assembler.active());
         assertEquals(0,resources.reservedBytes());assembler.forget(peer);assembler.clear();
         assertEquals(0,resources.reservedBytes());assertEquals(0,resources.active());
     }
@@ -71,7 +71,7 @@ class ManagementPageAssemblerTest {
     @Test void aDigestMismatchNeverYieldsACompleteObject() {
         var p=pages(1).get(0);
         var wrong=change(p,p.kind(),p.operationId(),group,new byte[32],1,0,1,p.data(),p.totalEntries());
-        var result=receive(wrong);assertEquals(CORRUPT,result.status());assertNull(result.completed());
+        var result=receive(wrong);assertEquals(CORRUPT,result.status());assertNull(result.completed());assertNull(result.ack());
         assertEquals(0,resources.active());assertEquals(0,resources.reservedBytes());
     }
     @Test void matchingDuplicatesRestartTheThirtySecondProgressDeadline() {
