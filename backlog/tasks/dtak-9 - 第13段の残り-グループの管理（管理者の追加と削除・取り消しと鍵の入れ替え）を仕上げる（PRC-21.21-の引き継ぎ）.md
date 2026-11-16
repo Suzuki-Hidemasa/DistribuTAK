@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 00:24'
-updated_date: '2026-11-16 10:48'
+updated_date: '2026-11-16 10:50'
 labels:
   - stage-13
 dependencies: []
@@ -69,4 +69,6 @@ PRC-163 のタスク PRC-21.21（ADR 0030 答え 167 の第13段）の未了の�
 6e6b842 の確認: S1 の直しで persist のロックが PERSISTING への移行と通知・R 確定の間で一度離れるが、その間も PERSISTING のため permits・requireData が通信と操作をすべて断り、世代を変える鍵の適用は RUNNING からしか始まらない。失効した相手が通る道・古い前提の commit はない（自分で読んで確認。二者のレビューは通していない）。プラグイン 416 件・lint も今回の変更のあとで成功。
 
 2026-11-16 利用者の決定: (1) 6a の push と PR を作ってよい。(2) 形式 1 のオンライン端末が 60 秒以内に切り替えなければ招待を止める（第9回で実装。docs/04 に記載）。(3) SDK は Downloads の ATAK-CIV-5.8.0.9-SDK.zip と同じものが ~/sdk/atak-civ-5.8.0.9/ にすでにあるので、コピーはしていない。(4) page_ack を 8 にする件は、8 が同じ oneof の admin_control の番号と衝突するため未実施。11 のまま。admin_control を動かすか、別の空き番号にするかを利用者に確認する。
+
+訂正: SDK の件（上の (3)）は未解決。今日（2026-11-16 19:46）Downloads に置かれたのは ATAK-CIV-5.8.0.10-SDK.zip で、5.8.0.9 の zip は 11/07 のものと同じ。プラグインは 5.8.0.9 を使う。5.8.0.10 をどこへ置くか・版を上げるかは利用者に確認する。
 <!-- SECTION:NOTES:END -->
