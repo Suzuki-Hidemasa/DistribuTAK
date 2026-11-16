@@ -7,9 +7,9 @@ import java.security.SecureRandom;
 import java.util.*;
 
 /**
- * 既存候補だけで失効一覧を取り直す。作業スレッドだけから呼び、保存 I/O は受信ロック外で行う。
+ * 通常失効と限定復旧の管理通信を共有する。復旧は既存候補だけを使う。作業スレッドだけから呼び、保存I/Oは受信ロック外で行う。
  * <p>
- * Retrieves revocations using existing candidates only. Called solely on the worker thread, with persistence outside receive locks.
+ * Shares management transport for normal revocations and limited recovery. Recovery uses existing candidates only. Called solely on the worker thread, with persistence outside receive locks.
  */
 final class RevocationRecovery implements AutoCloseable {
     interface Transport {
@@ -20,9 +20,9 @@ final class RevocationRecovery implements AutoCloseable {
     private final LanGroup group;
     private final SessionManager sessions;
     private final CorePersistenceCoordinator coordinator;
-    private final CorePersistenceCoordinator.PersistenceHooks hooks;
+    private final java.util.function.Supplier<CorePersistenceCoordinator.PersistenceHooks> hooks;
     private final Clock clock;
-    private final SecureRandom random;
+    private final ManagementOperations operations;
     private final Transport transport;
     private final ManagementSendBudget budget;
     private final ManagementPageSender sender;
@@ -33,7 +33,11 @@ final class RevocationRecovery implements AutoCloseable {
     private int requests;
     RevocationRecovery(LanGroup group,SessionManager sessions,CorePersistenceCoordinator coordinator,Clock clock,SecureRandom random,
                        Transport transport,CorePersistenceCoordinator.PersistenceHooks hooks){
-        this.group=group;this.sessions=sessions;this.coordinator=coordinator;this.clock=clock;this.random=random;this.transport=transport;this.hooks=hooks;
+        this(group,sessions,coordinator,clock,random,()->hooks,transport);
+    }
+    RevocationRecovery(LanGroup group,SessionManager sessions,CorePersistenceCoordinator coordinator,Clock clock,SecureRandom random,
+                       java.util.function.Supplier<CorePersistenceCoordinator.PersistenceHooks> hooks,Transport transport){
+        this.group=group;this.sessions=sessions;this.coordinator=coordinator;this.clock=clock;this.operations=new ManagementOperations(random);this.transport=transport;this.hooks=hooks;
         budget=new ManagementSendBudget(clock);
         sender=new ManagementPageSender(group.groupId,clock,budget,(p,s,w)->{
             if(!coordinator.permits(CorePersistenceCoordinator.Operation.REVOCATION_PAGE))return false;
@@ -41,7 +45,7 @@ final class RevocationRecovery implements AutoCloseable {
         });
     }
     void poll(List<byte[]> candidates){
-        coordinator.poll();
+        coordinator.poll();sender.discardUnverifiedSessions(sessions);
         if(coordinator.state()==CorePersistenceCoordinator.State.RECOVERING_REVOCATIONS){
             if(!coordinator.permits(CorePersistenceCoordinator.Operation.RECOVERY_REQUEST)){abandon();attempted.clear();return;}
             if(peer!=null&&clock.millis()-progress>=ManagementPageAssembler.PROGRESS_MILLIS)abandon();
@@ -61,7 +65,7 @@ final class RevocationRecovery implements AutoCloseable {
             if(peer!=null){
                 var verified=sessions.verifiedSession(peer);
                 if(verified!=null&&request==null){
-                    session=verified.sessionId();byte[] operation=new byte[16];random.nextBytes(operation);
+                    session=verified.sessionId();byte[] operation=operations.next();
                     var required=group.recoveryRequirement;
                     request=new RevocationsRecoveryRequest(group.groupId,operation,required.version(),required.digest());
                     if(!coordinator.bindRecovery(peer,session,verified.generation(),request)){abandon();return;}
@@ -74,11 +78,15 @@ final class RevocationRecovery implements AutoCloseable {
         if(coordinator.permits(CorePersistenceCoordinator.Operation.REVOCATION_PAGE))sender.poll();
     }
     boolean receive(byte[] source,byte[] sourceSession,byte[] wire){
+        return receive(source,sourceSession,wire,clock.millis());
+    }
+    boolean receive(byte[] source,byte[] sourceSession,byte[] wire,long receivedAt){
         var verified=sessions.verifiedSession(source);
         if(verified==null||!Arrays.equals(sourceSession,verified.sessionId()))return false;
-        RevocationsRecoveryRequest incoming=null;
-        try{incoming=RevocationsRecoveryRequest.decodeEnvelope(wire);}catch(IllegalArgumentException invalid){}
-        if(incoming!=null){
+        int field=ManagementEnvelopeFields.field(wire);
+        if(field==ManagementEnvelopeFields.REVOCATIONS_RECOVERY_REQUEST){
+            final RevocationsRecoveryRequest incoming;
+            try{incoming=RevocationsRecoveryRequest.decodeEnvelope(wire);}catch(IllegalArgumentException invalid){return true;}
             if(!coordinator.permits(CorePersistenceCoordinator.Operation.RECOVERY_REQUEST)||!Arrays.equals(group.groupId,incoming.group()))return true;
             var body=group.state.revocations();
             try{body.verify(AdminRecords.Kind.REVOCATIONS,group.groupId,group.state.administrators().entries());}
@@ -91,27 +99,47 @@ final class RevocationRecovery implements AutoCloseable {
             }
             sender.poll();return true;
         }
-        ManagementPageAck ack=null;
-        try{ack=ManagementPageAck.decodeEnvelope(wire);}catch(IllegalArgumentException invalid){}
-        if(ack!=null){
-            if(coordinator.permits(CorePersistenceCoordinator.Operation.PAGE_ACK))sender.acknowledge(source,sourceSession,verified.generation(),ack);
+        if(field==ManagementEnvelopeFields.PAGE_ACK){
+            final ManagementPageAck ack;
+            try{ack=ManagementPageAck.decodeEnvelope(wire);}catch(IllegalArgumentException invalid){return true;}
+            if(coordinator.permits(CorePersistenceCoordinator.Operation.PAGE_ACK))sender.acknowledgeAt(source,sourceSession,verified.generation(),ack,receivedAt);
             return true;
         }
+        if(field!=ManagementEnvelopeFields.REVOCATION_PAGE)return false;
         ManagementPage page;
-        try{page=ManagementPage.decodeEnvelope(wire);}catch(IllegalArgumentException invalid){return false;}
-        if(coordinator.state()!=CorePersistenceCoordinator.State.RECOVERING_REVOCATIONS)return false;
+        try{page=ManagementPage.decodeEnvelope(wire);}catch(IllegalArgumentException invalid){return true;}
+        boolean recovering=coordinator.state()==CorePersistenceCoordinator.State.RECOVERING_REVOCATIONS;
         if(page.kind()!=ManagementPage.Kind.REVOCATION)return true;
-        var result=coordinator.receiveRecoveryPage(source,sourceSession,verified.generation(),page,hooks);
+        var result=coordinator.receiveRevocationPage(source,sourceSession,verified.generation(),page,new CorePersistenceCoordinator.PersistenceHooks(){
+            private CorePersistenceCoordinator.PersistenceHooks delegate;
+            public void active(CorePersistenceCoordinator.PersistenceRequest request){delegate=hooks.get();delegate.active(request);}
+            public void save(AdminRecordStore.Snapshot snapshot){delegate.save(snapshot);}
+            public void save(CorePersistenceCoordinator.PersistenceRequest request){delegate.save(request);}
+            public void clear(CorePersistenceCoordinator.PersistenceRequest request){delegate.clear(request);}
+            public void stopped(CorePersistenceCoordinator.StopReason reason){if(delegate!=null)delegate.stopped(reason);}
+            public void selfRevoked(){if(delegate!=null)delegate.selfRevoked();}
+        },receivedAt);
         if(result.status()==ManagementPageAssembler.Status.REJECTED||result.status()==ManagementPageAssembler.Status.CORRUPT){
-            if(Arrays.equals(peer,source)&&Arrays.equals(session,sourceSession))abandon();return true;
+            if(recovering&&Arrays.equals(peer,source)&&Arrays.equals(session,sourceSession))abandon();return true;
         }
         if(result.completed()!=null&&coordinator.state()==CorePersistenceCoordinator.State.RECOVERING_REVOCATIONS){abandon();return true;}
-        if(result.status()==ManagementPageAssembler.Status.INCOMPLETE||result.status()==ManagementPageAssembler.Status.COMPLETE)progress=clock.millis();
+        if(result.status()==ManagementPageAssembler.Status.INCOMPLETE||result.status()==ManagementPageAssembler.Status.COMPLETE)progress=Math.max(progress,receivedAt);
         if(result.ack()!=null&&coordinator.permits(CorePersistenceCoordinator.Operation.PAGE_ACK))sender.sendAck(source,sourceSession,result.ack());
         return true;
+    }
+    ManagementPageSender.Offer offerRevocations(byte[] destination){
+        if(coordinator.state()!=CorePersistenceCoordinator.State.RUNNING)return ManagementPageSender.Offer.BUSY;
+        var verified=sessions.verifiedSession(destination);if(verified==null)return ManagementPageSender.Offer.INVALID;
+        var body=group.state.revocations();
+        try{body.verify(AdminRecords.Kind.REVOCATIONS,group.groupId,group.state.administrators().entries());}
+        catch(RuntimeException untrusted){return ManagementPageSender.Offer.INVALID;}
+        if(body.format()!=2)return ManagementPageSender.Offer.INVALID;
+        sender.discardOtherSessions(destination,verified.sessionId(),verified.generation());
+        return sender.offer(destination,verified.sessionId(),verified.generation(),ManagementPage.Kind.REVOCATION,
+                operations.next(),body.encode(),body.entries().size(),false);
     }
     private void abandon(){
         coordinator.abandonRecovery();Crypto.wipe(peer);Crypto.wipe(session);peer=null;session=null;request=null;requests=0;lastRequest=Long.MIN_VALUE;
     }
-    public void close(){abandon();attempted.clear();}
+    public void close(){abandon();sender.close();attempted.clear();}
 }

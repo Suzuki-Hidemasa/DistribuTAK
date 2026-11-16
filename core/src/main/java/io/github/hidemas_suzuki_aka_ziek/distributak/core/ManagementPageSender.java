@@ -12,13 +12,13 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * 管理ページの送り手。通信・時刻・予算は注入し、製品の通信口にはまだ接続しない。
+ * 管理ページの送り手。通信・時刻・予算は注入し、通常失効と限定復旧で共有する。
  * 同じスレッドから呼び、送信口は受信処理を同期で呼び戻さずキューへ渡す。
  * <p>
- * A management page sender with injected transport, time and budget, not yet connected to product transport entry points.
+ * A management page sender with injected transport, time and budget, shared by normal revocations and limited recovery.
  * Call on one thread; the transport queues frames rather than calling receive processing back synchronously.
  */
-public final class ManagementPageSender {
+public final class ManagementPageSender implements AutoCloseable {
     @FunctionalInterface public interface Sender {boolean send(byte[] peer,byte[] session,byte[] plaintext);}
     public enum Offer {ACCEPTED,FULL,BUSY,PEER_BUSY,INVALID,DHT_TRANSFER_OR_INVITATION}
     public static final long MAX_HELD_BYTES=8L*1024*1024;
@@ -66,6 +66,18 @@ public final class ManagementPageSender {
         Crypto.length(peer,32);Crypto.length(session,16);var key=new DhtId(peer);
         for(var out:all())if(out.peer.equals(key)&&(out.generation!=generation||!Arrays.equals(out.session,session)))remove(out,false);
     }
+    /**
+     * 閉鎖・交換済みのセッション宛ての送信を、残す送信の期限を変えず解放する。
+     * <p>
+     * Releases sends for closed or replaced sessions without changing deadlines of retained sends.
+     */
+    public void discardUnverifiedSessions(SessionManager sessions){
+        for(var out:all()){
+            var current=sessions.verifiedSession(out.peer.bytes());
+            if(current==null||current.generation()!=out.generation||!Arrays.equals(current.sessionId(),out.session))remove(out,false);
+        }
+    }
+    @Override public void close(){for(var out:all())remove(out,false);}
     public Offer offer(byte[] peer,byte[] session,long generation,ManagementPage.Kind kind,byte[] operation,byte[] data,int entries,boolean notice){
         Crypto.length(peer,32);Crypto.length(session,16);Crypto.length(operation,16);Objects.requireNonNull(kind);
         if(data==null||data.length<1||data.length>ManagementPage.MAX_TOTAL_BYTES||entries<0||entries>ManagementPage.MAX_ENTRIES)return Offer.INVALID;
@@ -85,7 +97,7 @@ public final class ManagementPageSender {
         var peers=new HashSet<DhtId>();for(var o:pending)if(!isActive(o.peer))peers.add(o.peer);return peers;
     }
     private void remove(Out o,boolean success){
-        active.remove(o);pending.remove(o);held-=o.bytes();if(success)completed++;else failed++;
+        active.remove(o);pending.remove(o);held-=o.bytes();Crypto.wipe(o.session);for(var page:o.pages)page.wipeData();if(success)completed++;else failed++;
     }
     private void promoteSamePeer(DhtId peer,long now){
         var next=pending.stream().filter(o->o.peer.equals(peer)&&!o.blocked(rotating)).min(Comparator.comparingInt(Out::rank)).orElse(null);
@@ -136,9 +148,18 @@ public final class ManagementPageSender {
         return true;
     }
     public void acknowledge(byte[] peer,byte[] session,long generation,ManagementPageAck ack){
+        acknowledgeAt(peer,session,generation,ack,clock.millis());
+    }
+    /**
+     * 保留したACKの受信時刻で進捗を記録し、処理時刻へ期限を延ばさない。
+     * <p>
+     * Records progress at a queued ACK's reception time without extending deadlines to its processing time.
+     */
+    public void acknowledgeAt(byte[] peer,byte[] session,long generation,ManagementPageAck ack,long receivedAt){
         Objects.requireNonNull(ack);var key=new DhtId(peer);long now=clock.millis();
         var out=active.stream().filter(o->o.peer.equals(key)).findFirst().orElse(null);
-        if(out==null||out.generation!=generation||!Arrays.equals(out.session,session)||!Arrays.equals(group,ack.group()))return;
+        if(receivedAt>now||now-receivedAt>=PROGRESS_MS)return;
+        if(out==null||receivedAt<out.offered||out.generation!=generation||!Arrays.equals(out.session,session)||!Arrays.equals(group,ack.group()))return;
         var first=out.pages.get(0);
         if(!Arrays.equals(first.operationId(),ack.operationId())||!Arrays.equals(first.objectDigest(),ack.objectDigest()))return;
         if(now<last||now-out.offered>=TOTAL_MS||now-out.progress>=PROGRESS_MS)return;
@@ -146,7 +167,7 @@ public final class ManagementPageSender {
         boolean sentIndex=false;
         for(int i:ack.pageIndices())if(out.ever[i]){
             sentIndex=true;
-            if(!out.acked[i]){out.acked[i]=true;out.progress=now;}
+            if(!out.acked[i]){out.acked[i]=true;out.progress=Math.max(out.progress,receivedAt);}
         }
         if(ack.complete()&&sentIndex){remove(out,true);promoteSamePeer(out.peer,now);}
     }

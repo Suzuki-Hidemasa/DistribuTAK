@@ -207,7 +207,16 @@ final class LanController implements AutoCloseable {
         public void receive(byte[] peer,byte[] plain){}
         public void receive(byte[] peer,byte[] session,byte[] plain){
             if(stopped||epoch!=generation.get()||plain.length==0)return;
-            if(inbox.offer(epoch,peer,session,plain))scheduleDrain();
+            var coordinator=persistence;var receivedClock=managementClock;
+            if(coordinator!=null){
+                var state=coordinator.state();
+                if(state==CorePersistenceCoordinator.State.STORAGE_FAILED)return;
+                if(state==CorePersistenceCoordinator.State.PERSISTING){
+                    try{if(ManagementPage.decodeEnvelope(plain).kind()!=ManagementPage.Kind.REVOCATION)return;}
+                    catch(IllegalArgumentException invalid){return;}
+                }
+            }
+            if(inbox.offer(epoch,peer,session,plain,receivedClock==null?0:receivedClock.millis()))scheduleDrain();
         }
     };}
     private void scheduleDrain(){
@@ -217,14 +226,18 @@ final class LanController implements AutoCloseable {
     private void drainInbox(){
         try {
             for(int i=0;i<32;i++) {
+                if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.PERSISTING)break;
                 SyncInbox.Packet packet=inbox.take();if(packet==null)break;
                 try(packet) {
                     if(packet.epoch!=generation.get()||endpoint==null)continue;
                     byte[] current=endpoint.sessionId(packet.peer);
                     try{if(current==null||!Crypto.equal(current,packet.session))continue;}
                     finally{Crypto.wipe(current);}
-                    if(recovery!=null&&recovery.receive(packet.peer,packet.session,packet.wire)){
-                        finishRecovery();continue;
+                    if(recovery!=null&&recovery.receive(packet.peer,packet.session,packet.wire,packet.receivedAt)){
+                        if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
+                            storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
+                        }else finishRecovery();
+                        continue;
                     }
                     if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.COT_RECEIVE))continue;
                     if(LanSupport.isTestData(packet.wire)){rx++;log(LanSupport.receipt(rx,packet.peer));}
@@ -241,7 +254,7 @@ final class LanController implements AutoCloseable {
                 }
             }
         } finally {
-            draining.set(false);if(inbox.size()!=0)scheduleDrain();
+            draining.set(false);if(inbox.size()!=0&&(persistence==null||persistence.state()!=CorePersistenceCoordinator.State.PERSISTING))scheduleDrain();
         }
         publish();
     }
@@ -273,7 +286,8 @@ final class LanController implements AutoCloseable {
         catch(Unavailable e){reconnect.stop();releaseGroup();if(ready)message=e.getMessage();}
         catch(Exception e){reconnect.stop();releaseGroup();if(ready)message=RENEW_FAILED;}
     }
-    private CorePersistenceCoordinator persistence;
+    private volatile CorePersistenceCoordinator persistence;
+    private volatile Clock managementClock;
     private RevocationRecovery recovery;
     private SessionManager managedSessions;
     private boolean recoveringNetwork;
@@ -303,18 +317,19 @@ final class LanController implements AutoCloseable {
         SessionManager sessions=null;
         try {
             sessions=group.sessions(clock,runtime.nanos);
+            managementClock=new MonotonicClock(runtime.nanos);
             persistence=new CorePersistenceCoordinator(group.state,sessions,new RevocationUnion(group.groupId,new AdminStateTrust(group.state)),
-                    clock,new MonotonicClock(runtime.nanos),group.recoveryRequirement);
+                    clock,managementClock,group.recoveryRequirement);
             UdpEndpoint next=new UdpEndpoint(sessions,group.state,socket,receiver(epoch),
                     UdpEndpoint.DEFAULT_INTERVAL,runtime.nanos,reason->closed(epoch,reason));
             SessionManager managed=sessions;sessions=null;
             opened(next,selected);
             managedSessions=managed;
-            recovery=new RevocationRecovery(group,managed,persistence,new MonotonicClock(runtime.nanos),random,new RevocationRecovery.Transport(){
+            recovery=new RevocationRecovery(group,managed,persistence,managementClock,random,()->store.persistenceHooks(group),new RevocationRecovery.Transport(){
                 public boolean send(byte[] peer,byte[] session,byte[] wire){return next.sendIfSession(peer,session,wire);}
                 public void start(byte[] peer){next.start(peer);}
                 public void rejected(ManagementPageSender.Offer result){reject++;}
-            },limited?store.persistenceHooks(group):null);
+            });
             if(!limited)startDht(next,managed,selected,epoch);
             else message="保存がいっぱい";
             if(group.peerCertificate!=null){next.expectPeerCertificate(group.peerCertificate);next.setPeerAddress(Crypto.blake2s(group.peerCertificate.field(0)),group.peerAddress);}
@@ -605,6 +620,7 @@ final class LanController implements AutoCloseable {
     }
     private void poll()throws Exception {
         networkChanged();
+        if(inbox.size()!=0&&(persistence==null||persistence.state()!=CorePersistenceCoordinator.State.PERSISTING))scheduleDrain();
         if(endpoint==null&&ready&&savedMember&&selection()!=null&&!certificateExpired&&reconnect.due(runtime.nanos.getAsLong())){
             try{requireGroup();openMember();startPeer();}
             catch(StoredCertificateFailure e){
@@ -869,7 +885,7 @@ final class LanController implements AutoCloseable {
     private void stopNetwork(){
         if(recovery!=null){recovery.close();recovery=null;}
         managedSessions=null;recoveringNetwork=false;
-        persistence=null;joining=false;proofRequests.close();
+        persistence=null;managementClock=null;joining=false;proofRequests.close();
         for(var entry:memberFirst.values())Crypto.wipe(entry.session);memberFirst.clear();
         for(byte[] session:deliverySessions.values())Crypto.wipe(session);deliverySessions.clear();
         // callbackは同じworkerへキューを置くだけなので、ここからcloseを待てる。

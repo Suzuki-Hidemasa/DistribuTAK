@@ -6,6 +6,12 @@ import static org.junit.Assert.*;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.Crypto;
 
 public class SyncInboxTest {
+    @Test public void timestampSurvivesQueueAndOwnedPlaintextIsWipedOnDiscard(){
+        var inbox=new SyncInbox();byte[] wire={1,2,3};
+        assertTrue(inbox.offer(1,peer(1),new byte[16],wire,123));
+        var packet=inbox.take();assertEquals(123,packet.receivedAt);packet.close();
+        assertArrayEquals(new byte[3],packet.wire);assertArrayEquals(new byte[]{1,2,3},wire);
+    }
     private static byte[] peer(int id){byte[] peer=new byte[32];peer[0]=(byte)id;return peer;}
     @Test public void acceptsAllSeventyTwoFragmentsAndLimitsPeer() {
         var inbox=new SyncInbox();byte[] session=new byte[16],wire=new byte[1024];

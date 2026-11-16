@@ -181,7 +181,11 @@ class CorePersistenceCoordinatorTest {
                 assertThrows(IllegalStateException.class,()->a.sessions.rotateGroupKey(key(40),1));
                 assertTrue(a.sessions.poll().isEmpty());
                 for(var op:Operation.values())assertFalse(c.permits(op));
-            }));assertArrayEquals(new byte[]{1},a.sessions.receive(data).plaintext());
+            }));
+            // 保存中に復号して捨てたDATAの番号は消費済みで、再送には新しい暗号文が必要。
+            // DATA decrypted and discarded during persistence has consumed its counter; retransmission needs fresh ciphertext.
+            assertThrows(SecurityException.class,()->a.sessions.receive(data));
+            assertArrayEquals(new byte[]{1},a.sessions.receive(f.data(b,a,1)).plaintext());
         }
     }
     @Test void revokedPeerIsRejectedBeforePersistenceAndCannotReturn(){

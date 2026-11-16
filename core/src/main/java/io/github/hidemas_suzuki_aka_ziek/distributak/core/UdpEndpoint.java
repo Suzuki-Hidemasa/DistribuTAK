@@ -470,7 +470,8 @@ public final class UdpEndpoint implements AutoCloseable {
                         try {
                             // 大きさと DTK の構文を暗号の検査より先に確かめる。
                             var packet=SessionPacket.decode(wire);
-                            var result=member().receive(wire,certificate->checkFirstPeer(certificate,source));peer=result.peerId();
+                            try(var result=member().receive(wire,certificate->checkFirstPeer(certificate,source))){
+                            peer=result.peerId();
                             String peerKey=key(peer);
                             if(packet.kind()==SessionPacket.FIRST && !addresses.containsKey(peerKey)) {
                                 if(pinnedHandshake!=null) {
@@ -518,6 +519,7 @@ public final class UdpEndpoint implements AutoCloseable {
                                 addresses.put(peerKey,source);
                             }
                             dispatch(result.outbound());plaintext=result.plaintext();sessionId=result.sessionId();
+                            }
                         } finally { sweepVolatile();stopIfSessionsClosed(); }
                     }
                 } catch(RandomFailure e) {

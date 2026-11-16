@@ -131,13 +131,18 @@ public final class SessionManager implements AutoCloseable {
         @Override public byte[] packet() { return packet.clone(); }
         @Override public String toString() { return "Outbound"; }
     }
-    /** plaintext は DATA のときだけ。空の DATA は鍵の確認にも使う。 */
-    public record Received(byte[] peerId,byte[] plaintext,List<Outbound> outbound,byte[] sessionId) {
+    /**
+     * plaintextはDATAのときだけ。空のDATAは鍵の確認にも使う。closeで所有する写しを消去する。
+     * <p>
+     * Plaintext exists only for DATA; empty DATA also confirms keys. Close wipes owned copies.
+     */
+    public record Received(byte[] peerId,byte[] plaintext,List<Outbound> outbound,byte[] sessionId) implements AutoCloseable {
         public Received(byte[] peerId,byte[] plaintext,List<Outbound> outbound){this(peerId,plaintext,outbound,new byte[0]);}
         public Received { peerId=peerId.clone();plaintext=plaintext==null ? null : plaintext.clone();outbound=List.copyOf(outbound);sessionId=sessionId.clone(); }
         @Override public byte[] peerId() { return peerId.clone(); }
         @Override public byte[] plaintext() { return plaintext==null ? null : plaintext.clone(); }
         @Override public byte[] sessionId() { return sessionId.clone(); }
+        @Override public void close(){Crypto.wipe(plaintext);Crypto.wipe(peerId);Crypto.wipe(sessionId);}
         @Override public String toString() { return "Received"; }
     }
     /** plaintextSent が false なら中身は送らず預からない。outbound だけを相手に渡す。 */
@@ -500,27 +505,35 @@ public final class SessionManager implements AutoCloseable {
     public synchronized Received receive(byte[] wire) {
         return receive(wire,certificate->{});
     }
-    /** UDPのpinを、証明書の検査後・時刻と相手の採用前に確かめる。 */
+    /**
+     * UDPのpinを、証明書の検査後・時刻と相手の採用前に確かめる。
+     * <p>
+     * Checks the UDP pin after certificate validation and before adopting the peer and timestamp.
+     */
     synchronized Received receive(byte[] wire,java.util.function.Consumer<AdminRecords.Record> firstPeerCheck) {
         open();refresh();open();SessionPacket packet=SessionPacket.decode(wire);
-        requireHandshake();
+        boolean persisting=coordinator!=null&&coordinator.acceptsPersistingData();
+        if(!persisting||packet.kind()!=SessionPacket.DATA)requireHandshake();
         if(packet.kind()==SessionPacket.FIRST) return first(packet,wire,firstPeerCheck);
         Peer p=routes.get(key(packet.id()));
         if(p==null && packet.kind()==SessionPacket.SECOND) {
             Unconfirmed u=unconfirmedRoutes.get(key(packet.id()));
             if(u!=null) return unconfirmedSecond(u,packet);
         }
+        if(persisting&&(p==null||p.invalid||!matching(p.active,packet)))throw new IllegalStateException("Existing session required during persistence");
         if(p==null || p.invalid) throw new SecurityException("受け手のセッションがありません");
         if(packet.kind()==SessionPacket.SECOND) return second(p,packet,wire);
         Connection c=matching(p.active,packet) ? p.active : matching(p.candidate,packet) ? p.candidate : null;
-        if(c==null) throw new SecurityException("受け手の鍵がありません");
+        if(c==null||persisting&&c!=p.active) throw new SecurityException("受け手の鍵がありません");
+        requirePeer(identity(p.certificate));
         byte[] plain=c.transport.receiveDatagram(packet.counter(),packet.body(),packet.header());
-        if(coordinator!=null&&plain.length!=0){
-            try{coordinator.requireData(plain);}catch(RuntimeException rejected){Crypto.wipe(plain);throw rejected;}
+        if(coordinator!=null&&(persisting||plain.length!=0)){
+            try{coordinator.requireReceivedData(plain);}catch(RuntimeException rejected){Crypto.wipe(plain);throw rejected;}
         }
-        authenticated(p);
-        if(c==p.candidate) promote(p,c);
-        return new Received(identity(p.certificate),plain,List.of(),packet.id());
+        try{
+            if(!persisting){authenticated(p);if(c==p.candidate)promote(p,c);}
+            return new Received(identity(p.certificate),plain,List.of(),packet.id());
+        }finally{Crypto.wipe(plain);}
     }
     private static boolean matching(Connection c,SessionPacket packet) {
         return c!=null && c.version==packet.version() && Crypto.equal(c.id,packet.id());
@@ -595,7 +608,7 @@ public final class SessionManager implements AutoCloseable {
         dropActive(p);if(p.candidate==c) p.candidate=null;
         p.active=c;p.rotating=false;p.exhausted=false;p.restartScheduled=false;p.attempt=null;
     }
-    private void dropActive(Peer p) { if(p.active!=null) { routes.remove(key(p.active.id));p.active.close();p.active=null; } }
+    private void dropActive(Peer p) { if(p.active!=null) { if(coordinator!=null)coordinator.forgetManagementPages(identity(p.certificate));routes.remove(key(p.active.id));p.active.close();p.active=null; } }
     private void dropCandidate(Peer p) { if(p.candidate!=null) { routes.remove(key(p.candidate.id));p.candidate.close();p.candidate=null; } }
     private void dropPending(Peer p) { if(p.pending!=null) { routes.remove(key(p.pending.id));p.pending.close();p.pending=null; } }
     private void destroy(Peer p) { dropActive(p);dropCandidate(p);dropPending(p);p.attempt=null;p.rotating=false;p.restartScheduled=false; }

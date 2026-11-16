@@ -27,8 +27,9 @@ public class RecoveryTransportTest {
         final Time time=new Time();final Wire requestWire=new Wire(),responseWire=new Wire();
         final LanGroup a,b;final SessionManager sa,sb;final CorePersistenceCoordinator ca,cb;
         final RevocationRecovery receiver,responder;final byte[] subject=StoredUpdatesTest.key(81);
-        int saves;
-        Pair()throws Exception{
+        int saves;Runnable duringSave=()->{};
+        Pair()throws Exception{this(true);}
+        Pair(boolean recovering)throws Exception{
             a=LanGroup.create(54321,StorageGroupTest.CLOCK,new java.security.SecureRandom());
             b=LanGroup.decode(a.encode(),StorageGroupTest.CLOCK,true);
             Crypto.wipe(b.identitySecret);Crypto.wipe(b.handshakeSecret);Crypto.wipe(b.administratorSecret);
@@ -36,12 +37,12 @@ public class RecoveryTransportTest {
             b.certificate=StoredUpdatesTest.peer(a,71,72,StorageGroupTest.NOW);
             a.peerCertificate=b.certificate;b.peerCertificate=a.certificate;
             a.peerAddress=b.peerAddress=new java.net.InetSocketAddress(java.net.InetAddress.getByAddress(new byte[]{(byte)192,0,2,1}),54322);
-            a.recoveryRequirement=CorePersistenceCoordinator.RecoveryRequirement.candidateLess(2,List.of(subject));a.storageBlocked=true;
+            if(recovering){a.recoveryRequirement=CorePersistenceCoordinator.RecoveryRequirement.candidateLess(2,List.of(subject));a.storageBlocked=true;}
             sa=a.sessions(StorageGroupTest.CLOCK,()->time.now*1_000_000);sb=b.sessions(StorageGroupTest.CLOCK,()->time.now*1_000_000);
             ca=new CorePersistenceCoordinator(a.state,sa,new RevocationUnion(a.groupId,new AdminStateTrust(a.state)),StorageGroupTest.CLOCK,time,a.recoveryRequirement);
             cb=new CorePersistenceCoordinator(b.state,sb,new RevocationUnion(b.groupId,new AdminStateTrust(b.state)),StorageGroupTest.CLOCK,time);
             var second=sb.receive(sa.start(b.id()).packet());var confirm=sa.receive(second.outbound().get(0).packet());sb.receive(confirm.outbound().get(0).packet());
-            receiver=new RevocationRecovery(a,sa,ca,time,new java.security.SecureRandom(),requestWire,new CorePersistenceCoordinator.PersistenceHooks(){public void save(AdminRecordStore.Snapshot s){saves++;}});
+            receiver=new RevocationRecovery(a,sa,ca,time,new java.security.SecureRandom(),requestWire,new CorePersistenceCoordinator.PersistenceHooks(){public void save(AdminRecordStore.Snapshot s){saves++;duringSave.run();}});
             responder=new RevocationRecovery(b,sb,cb,time,new java.security.SecureRandom(),responseWire,null);
         }
         AdminRecords.Record body(long version,List<byte[]> subjects){return AdminRecords.list(AdminRecords.Kind.REVOCATIONS,a.groupId,version,StorageGroupTest.NOW,subjects,a.administratorSecret);}
