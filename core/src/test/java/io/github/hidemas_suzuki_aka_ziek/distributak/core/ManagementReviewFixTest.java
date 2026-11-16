@@ -10,6 +10,7 @@ import static io.github.hidemas_suzuki_aka_ziek.distributak.core.ManagementPageS
 import static io.github.hidemas_suzuki_aka_ziek.distributak.core.ManagementPageAssembler.Status.*;
 
 class ManagementReviewFixTest {
+    final AckReceiver ackReceiver=new AckReceiver();
     final Time clock=new Time();
     final TransferResources resources=new TransferResources();
     final ManagementPageAssembler assembler=new ManagementPageAssembler(GROUP,clock,resources);
@@ -20,7 +21,7 @@ class ManagementReviewFixTest {
     ManagementPageAssembler.Result receive(ManagementPage page){return assembler.receive(peer(1),SESSION,1,page);}
     void offer(ManagementPage.Kind kind,int operation,int bytes){assertEquals(ManagementPageSender.Offer.ACCEPTED,
             sender.offer(peer(1),SESSION,1,kind,op(operation),new byte[bytes],0,false));}
-    void ack(ManagementPage page){sender.acknowledge(peer(1),SESSION,1,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()},page.pageIndex()==page.pageCount()-1));}
+    void ack(ManagementPage page){sender.acknowledge(peer(1),SESSION,1,ackReceiver.receive(page));}
     void assertRejectedWithoutAck(ManagementPageAssembler.Result result){
         assertEquals(REJECTED,result.status());assertNull(result.ack());assertNull(result.completed());
     }

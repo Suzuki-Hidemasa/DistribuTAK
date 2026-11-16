@@ -8,8 +8,10 @@ import static io.github.hidemas_suzuki_aka_ziek.distributak.core.ManagementWire.
 
 /**
  * 最大 4 ページの配送確認。これだけで署名済み記録を受理したとは扱わない。項目 11 は利用者の確認待ちの仮番号。
+ * complete=1 は、受け手が対象の全体を完成した（または完了の記録に一致する）ことだけを示し、署名・権限・適用の成功は保証しない。
  * <p>
  * Confirms delivery of up to four pages, never acceptance of a signed record. Field 11 is provisional pending user confirmation.
+ * complete=1 only indicates that the receiver completed the whole object (or matched a remembered completion), and does not guarantee signature validity, authorization, or successful application.
  */
 public final class ManagementPageAck {
     public static final int ENVELOPE_FIELD=11,MAX_INDICES=4;

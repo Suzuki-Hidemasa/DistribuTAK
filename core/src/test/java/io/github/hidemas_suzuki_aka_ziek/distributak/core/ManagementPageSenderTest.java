@@ -6,6 +6,10 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.Map;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -22,6 +26,15 @@ class ManagementPageSenderTest {
         public long millis(){return now;}
     }
     record Frame(long time,byte[] peer,byte[] data) {}
+    static class AckReceiver {
+        final Map<String,BitSet> received=new HashMap<>();
+        ManagementPageAck receive(ManagementPage page){
+            var indices=received.computeIfAbsent(HexFormat.of().formatHex(page.operationId()),key->new BitSet());
+            indices.set(page.pageIndex());
+            return new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()},indices.cardinality()==page.pageCount());
+        }
+    }
+    final AckReceiver ackReceiver=new AckReceiver();
     final Time clock=new Time();
     final ManagementSendBudget budget=new ManagementSendBudget(clock);
     final List<Frame> frames=new ArrayList<>();
@@ -31,7 +44,19 @@ class ManagementPageSenderTest {
     }
     void ack(Frame frame,long generation){
         var page=ManagementPage.decodeEnvelope(frame.data());
-        sender.acknowledge(frame.peer(),SESSION,generation,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()},page.pageIndex()==page.pageCount()-1));
+        sender.acknowledge(frame.peer(),SESSION,generation,ackReceiver.receive(page));
+    }
+    @Test void ackHelperWaitsForEveryPageOfEachOperation(){
+        var first=ManagementPage.split(ManagementPage.Kind.REVOCATION,op(1),GROUP,new byte[3072],0);
+        var second=ManagementPage.split(ManagementPage.Kind.REVOCATION,op(2),GROUP,new byte[3072],0);
+        assertFalse(ackReceiver.receive(first.get(2)).complete());
+        assertFalse(ackReceiver.receive(first.get(0)).complete());
+        assertFalse(ackReceiver.receive(first.get(0)).complete());
+        assertFalse(ackReceiver.receive(second.get(1)).complete());
+        assertTrue(ackReceiver.receive(first.get(1)).complete());
+        assertTrue(ackReceiver.receive(first.get(2)).complete());
+        assertFalse(ackReceiver.receive(second.get(2)).complete());
+        assertTrue(ackReceiver.receive(second.get(0)).complete());
     }
     @Test void slidingBudgetReservesAtomicallyAndCountsTheExactOneSecondBoundary(){
         assertTrue(budget.tryTake(peer(1),3));assertFalse(budget.tryTake(peer(1),2));assertTrue(budget.tryTake(peer(1),1));
@@ -99,17 +124,21 @@ class ManagementPageSenderTest {
     @Test void sixtyFourPagesWithLossAndAcknowledgementsFinishWithinTheBudgetAndDeadline(){
         var reverseBudget=new ManagementSendBudget(clock);
         var pendingAcks=new ArrayList<Frame>();
+        var received=new BitSet();
         offer(1,1,ManagementPage.Kind.REVOCATION,65536,100,false);int read=0,ackCount=0;boolean lost=false;
         for(int tick=0;tick<2400&&sender.completed()==0;tick++){
             clock.now=tick*100;sender.poll();
             while(read<frames.size()){
                 Frame f=frames.get(read++);var page=ManagementPage.decodeEnvelope(f.data());
-                if(page.pageIndex()==2&&!lost){lost=true;continue;}pendingAcks.add(f);
+                if(page.pageIndex()==2&&!lost){lost=true;continue;}received.set(page.pageIndex());pendingAcks.add(f);
             }
             var it=pendingAcks.iterator();while(it.hasNext()){
                 Frame f=it.next();if(!reverseBudget.tryTake(peer(1),1))break;ack(f,7);ackCount++;it.remove();
             }
+            if(received.cardinality()<64)assertEquals(0,sender.completed());
         }
+        assertTrue(lost);assertEquals(64,received.cardinality());assertEquals(0,sender.failed());
+        assertEquals(2,frames.stream().filter(f->ManagementPage.decodeEnvelope(f.data()).pageIndex()==2).count());
         assertEquals(1,sender.completed());assertTrue(clock.now<240000);assertTrue(frames.size()+ackCount<960);
         for(var frame:frames){
             long count=frames.stream().filter(f->f.time()>frame.time()-1000&&f.time()<=frame.time()).count();

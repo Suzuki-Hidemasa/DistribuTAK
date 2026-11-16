@@ -100,7 +100,10 @@ message ManagementPage {
 // Confirms page delivery only, not acceptance of a signed record.
 message ManagementPageAck {
   uint32 schema = 1; bytes group_id = 2; bytes operation_id = 3; bytes object_digest = 4;
-  repeated uint32 page_index = 5 [packed = true]; uint32 complete = 6;
+  repeated uint32 page_index = 5 [packed = true];
+  // complete=1 は、受け手が対象の全体を完成した（または完了の記録に一致する）ことだけを示し、署名・権限・適用の成功は保証しない。
+  // complete=1 only indicates that the receiver completed the whole object (or matched a remembered completion), and does not guarantee signature validity, authorization, or successful application.
+  uint32 complete = 6;
 }
 message ProofCertificateRenewal {
   uint32 schema = 1; uint32 operation = 2; bytes group_id = 3; bytes request_id = 4;
