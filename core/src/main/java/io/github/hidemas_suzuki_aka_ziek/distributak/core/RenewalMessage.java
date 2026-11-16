@@ -63,6 +63,19 @@ public final class RenewalMessage {
             &&Arrays.equals(member,other.member)&&Arrays.equals(administrator,other.administrator)&&Arrays.equals(base,other.base)
             &&Arrays.equals(handshake,other.handshake)&&Arrays.equals(managementOperation,other.managementOperation);
     }
+    /**
+     * 要求番号以外が同じか。再鍵のあとに同じ操作が新しい要求番号で届いた配送を、受領済みの配送と照合するために使う（DTAK-7）。
+     * <p>
+     * Whether everything except the request id is the same. Used to match a delivery that arrives for the same operation with a new request id after a re-key against the accepted delivery (DTAK-7).
+     *
+     * @param other 比べる相手。The message to compare with.
+     * @return 要求番号以外が同じなら true。True if all fields other than the request id are equal.
+     */
+    public boolean sameOperation(RenewalMessage other) {
+        return other!=null&&reason==other.reason&&Arrays.equals(group,other.group)
+            &&Arrays.equals(member,other.member)&&Arrays.equals(administrator,other.administrator)&&Arrays.equals(base,other.base)
+            &&Arrays.equals(handshake,other.handshake)&&Arrays.equals(managementOperation,other.managementOperation);
+    }
     public boolean matchesBase(AdminRecords.Record certificate) {
         return Crypto.equal(group,certificate.group())&&Crypto.equal(member,Crypto.blake2s(certificate.field(0)))
             &&Crypto.equal(handshake,certificate.field(1))&&Crypto.equal(base,Crypto.blake2s(certificate.signedBytes()));

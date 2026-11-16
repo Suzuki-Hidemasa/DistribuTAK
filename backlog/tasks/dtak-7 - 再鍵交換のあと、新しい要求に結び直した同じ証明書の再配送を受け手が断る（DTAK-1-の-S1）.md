@@ -1,9 +1,11 @@
 ---
 id: DTAK-7
 title: 再鍵交換のあと、新しい要求に結び直した同じ証明書の再配送を受け手が断る（DTAK-1 の S1）
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-16 00:02'
+updated_date: '2026-11-16 00:33'
 labels:
   - review
   - core
@@ -28,8 +30,20 @@ DTAK-1 のレビューの推奨 1 件（S1）。対象は core の GroupAdminist
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 04 の 4.5 に、再鍵交換のあとの配送の扱い（(a) か (b)）が書かれている
-- [ ] #2 送り手が新しいセッションで作った配送を受け手に渡す試験がある
-- [ ] #3 認証・管理者の対応・証明書の検証・FIRST の確定の条件が緩んでいない（別の証明書・古い証明書は成功にならない）
-- [ ] #4 核の試験・lint・NewApi が合格の目安どおり
+- [x] #1 04 の 4.5 に、再鍵交換のあとの配送の扱い（(a) か (b)）が書かれている
+- [x] #2 送り手が新しいセッションで作った配送を受け手に渡す試験がある
+- [x] #3 認証・管理者の対応・証明書の検証・FIRST の確定の条件が緩んでいない（別の証明書・古い証明書は成功にならない）
+- [x] #4 核の試験・lint・NewApi が合格の目安どおり
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+実装: RenewalMessage.sameOperation（request_id 以外の一致）を足し、GroupAdministration.receiveCertificateDelivery の受領の記録の照合で sameRequest の代わりに使った。相手・証明書のバイト列の照合、受領の記録の必須は変えていない。文書: 04 §4.5 に扱いと呼ぶ順（confirm を先、確定できないときだけ next）を書いた。呼ぶ順は決まりのみで、プラグインは next/confirm をまだ呼ばない。検証: AdministrationDeliveryTest 4 件合格（新規の再鍵後の再配送・操作番号違い・古い証明書の拒否を含む）、core 1,186 件・失敗/スキップ 0、plugin 416 件・失敗 0、lintCivDebug 合格、lint-core NewApi=0、git diff --check 問題なし。
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+再鍵交換のあと、新しい要求番号に結び直した同じ証明書の配送を、受領の記録と request_id 以外がすべて同じ場合に限り、保存し直さず成功として扱うようにした（(a)）。別の操作番号・古い証明書・受領の記録なしは従来どおり断る。呼ぶ順（confirm を先、確定できないときだけ next）を 04 §4.5 に決まりとして書いた（(b)）。core 1,186 件・plugin 416 件・NewApi 0 で合格。
+<!-- SECTION:FINAL_SUMMARY:END -->
