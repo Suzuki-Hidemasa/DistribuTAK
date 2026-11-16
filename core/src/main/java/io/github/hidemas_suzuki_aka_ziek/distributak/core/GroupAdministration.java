@@ -293,8 +293,9 @@ public final class GroupAdministration implements AutoCloseable {
                 ||!Crypto.equal(next.field(0),certificate.field(0))||!Crypto.equal(next.field(1),certificate.field(1)))throw invalid();
         state.verifyCertificate(next,Crypto.x25519Public(handshakeSecret));
         if(Arrays.equals(next.encode(),certificate.encode())) {
+            // 再鍵のあとは新しい要求番号で同じ証明書が届くので、要求番号以外が同じなら成功とする（04 §4.5、DTAK-7）。 / After a re-key the same certificate arrives with a new request id, so accept it when everything but the request id matches (04 §4.5, DTAK-7).
             var receipt=acceptedDelivery;
-            if(receipt==null||!Crypto.equal(receipt.peer,peer)||!receipt.message.sameRequest(delivery)
+            if(receipt==null||!Crypto.equal(receipt.peer,peer)||!receipt.message.sameOperation(delivery)
                     ||!Arrays.equals(receipt.message.certificate(),delivery.certificate()))throw invalid();
             return certificate;
         }
