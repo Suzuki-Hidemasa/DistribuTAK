@@ -41,8 +41,56 @@ class ManagementReviewFixTest {
         clock.now=239999;assertEquals(DUPLICATE,receive(first).status());
         clock.now=240000;assertEquals(COMPLETE,receive(first).status());
         assembler.forget(peer(1));assertEquals(COMPLETE,receive(first).status());
-        clock.now=240100;assembler.poll();clock.now=240050;assembler.poll();assertEquals(COMPLETE,receive(first).status());
+        clock.now=240100;assembler.poll();clock.now=240050;assembler.poll();
+        var duplicate=receive(first);assertEquals(DUPLICATE,duplicate.status());assertNull(duplicate.completed());assertNotNull(duplicate.ack());
         assembler.clear();assertEquals(COMPLETE,receive(first).status());
+    }
+    @Test void rememberedTargetsKeepTheirStatusForTwoHundredFortySecondsAfterRollback(){
+        clock.now=1000;var old=pages(1,2048);receive(old.get(0));
+        var complete=pages(2,1).get(0);receive(complete);clock.now=900;assembler.poll();
+        assertEquals(REJECTED,receive(old.get(0)).status());assertEquals(DUPLICATE,receive(complete).status());
+        clock.now=240899;assertEquals(REJECTED,receive(old.get(0)).status());assertEquals(DUPLICATE,receive(complete).status());
+        clock.now=240900;assertEquals(INCOMPLETE,receive(old.get(0)).status());
+        assertEquals(COMPLETE,receive(complete).status());
+    }
+    int read,receiverCompleted,rostersCompleted,rejected;
+    void drain(boolean dropRosterTail){
+        while(read<sent.size()){
+            var page=sent.get(read++);
+            if(dropRosterTail&&page.kind()==ManagementPage.Kind.ROSTER&&page.pageIndex()==1)continue;
+            var result=receive(page);
+            if(result.completed()!=null){receiverCompleted++;if(page.kind()==ManagementPage.Kind.ROSTER)rostersCompleted++;}
+            if(result.status()==REJECTED)rejected++;
+            if(result.ack()!=null)sender.acknowledge(peer(1),SESSION,1,result.ack());
+        }
+    }
+    @Test void resumedRosterCompletesAtBothEndsAfterTheReceiverAssemblyExpires(){
+        offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();drain(true);
+        sender.rotating(true);ack(sent.get(1));assertEquals(0,sender.completed());
+        clock.now=31000;assembler.poll();assertEquals(0,assembler.active());
+        sender.rotating(false);sender.poll();drain(false);
+        assertEquals(1,sender.completed());
+        assertEquals(1,receiverCompleted,"sender completed="+sender.completed()+", receiver completed="+receiverCompleted);
+        assertEquals(1,rostersCompleted);assertEquals(0,sender.failed());assertEquals(0,assembler.active());
+    }
+    @Test void resumedRosterFailsAfterARevocationReplacesItDuringAFiveSecondPause(){
+        offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();drain(true);sender.rotating(true);
+        offer(ManagementPage.Kind.REVOCATION,2,1);clock.now=1000;sender.poll();drain(false);
+        assertEquals(1,receiverCompleted);assertEquals(1,sender.completed());
+        clock.now=5000;sender.rotating(false);
+        for(int i=5;i<=9;i++){clock.now=i*1000;sender.poll();drain(false);}
+        assertTrue(rejected>0);assertEquals(0,rostersCompleted);assertEquals(1,receiverCompleted);
+        assertEquals(1,sender.completed());assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());
+    }
+    @Test void resumedRosterGetsAFreshRetryBudgetButKeepsItsOriginalTotalDeadline(){
+        offer(ManagementPage.Kind.ROSTER,1,2048);
+        for(int i=0;i<=3;i++){clock.now=i*1000;sender.poll();drain(true);}
+        sender.rotating(true);clock.now=34000;assembler.poll();sender.rotating(false);sender.poll();drain(true);
+        clock.now=35000;sender.poll();drain(false);
+        assertEquals(1,sender.completed());assertEquals(1,receiverCompleted);assertEquals(0,sender.failed());
+        offer(ManagementPage.Kind.ROSTER,3,2048);sender.poll();sender.rotating(true);
+        clock.now=275000;sender.rotating(false);sender.poll();
+        assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());
     }
     @Test void aFailedObjectIsReplacedAtFourSecondsAndOldFirstPagesCannotBounceBack(){
         offer(ManagementPage.Kind.REVOCATION,1,2048);offer(ManagementPage.Kind.ANNOUNCEMENT,2,2048);

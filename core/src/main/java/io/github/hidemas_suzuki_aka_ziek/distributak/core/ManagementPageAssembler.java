@@ -45,7 +45,8 @@ public final class ManagementPageAssembler {
         public Result(Status status,Completed completed){this(status,completed,null);}
     }
     private static final class Remembered {
-        final DhtId peer;final ManagementPage first;final byte[] session;final long generation,at;
+        final DhtId peer;final ManagementPage first;final byte[] session;final long generation;
+        long at;
         Remembered(DhtId peer,Assembly assembly,long now){
             this.peer=peer;first=assembly.first;session=assembly.session.clone();generation=assembly.generation;at=now;
         }
@@ -109,7 +110,7 @@ public final class ManagementPageAssembler {
             var lease=resources.acquire(key,page.totalBytes());if(lease==null)return result(Status.REJECTED);
             try{assembly=new Assembly(page,session,generation,now,lease);assemblies.put(key,assembly);}
             catch(RuntimeException|Error failure){lease.close();throw failure;}
-        }else if(!assembly.matches(page,session,generation))return result(Status.REJECTED);
+        }
         int index=page.pageIndex(),offset=index*ManagementPage.PAGE_BYTES;byte[] data=page.data();
         if(assembly.have[index]){
             for(int i=0;i<data.length;i++)if(assembly.buffer[offset+i]!=data[i]){
@@ -131,7 +132,12 @@ public final class ManagementPageAssembler {
     private void remove(DhtId peer){var assembly=assemblies.remove(peer);if(assembly!=null)assembly.lease.close();}
     public synchronized void poll(){
         long now=clock.millis();
-        if(now<lastClock){completed.clear();retired.clear();}lastClock=now;
+        if(now<lastClock){
+            // 時計が戻っても完了・破棄の記録を保ち、保持期間を今から数え直す。
+            // Preserve completion and retirement records on clock rollback and restart their retention period from now.
+            for(var record:completed)record.at=now;
+            for(var record:retired)record.at=now;
+        }lastClock=now;
         completed.removeIf(r->now-r.at>=TOTAL_MILLIS);retired.removeIf(r->now-r.at>=TOTAL_MILLIS);
         var iterator=assemblies.values().iterator();
         while(iterator.hasNext()){

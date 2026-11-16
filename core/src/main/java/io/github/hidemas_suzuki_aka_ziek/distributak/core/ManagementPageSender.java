@@ -37,6 +37,10 @@ public final class ManagementPageSender {
         int bytes(){return pages.get(0).totalBytes();}
         boolean blocked(boolean rotating){return rotating&&rank()==2&&pages.size()>1;}
         void activate(long now){started=now;progress=now;}
+        void resetForResume(){
+            Arrays.fill(acked,false);Arrays.fill(sent,false);Arrays.fill(ever,false);
+            Arrays.fill(retries,0);Arrays.fill(sentAt,0);ackCount=0;round=0;started=0;progress=0;
+        }
     }
     private final byte[] group;
     private final Clock clock;
@@ -139,7 +143,11 @@ public final class ManagementPageSender {
     }
     public void rotating(boolean value){
         rotating=value;
-        for(var o:new ArrayList<>(active))if(o.blocked(rotating)){active.remove(o);pending.add(o);}
+        for(var o:new ArrayList<>(active))if(o.blocked(rotating)){
+            // 受け手の組立が消えていても完成できるよう、投入時刻を保って全ページを送り直す。
+            // Resend every page while preserving the offer time so completion remains possible after receiver assembly expiry.
+            active.remove(o);o.resetForResume();pending.add(o);
+        }
     }
     public int active(){return active.size();}
     public int pendingPeers(){return queuedPeers().size();}
