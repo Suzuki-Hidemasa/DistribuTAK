@@ -72,7 +72,7 @@ public final class AdminControl {
     }
     public byte[] envelope(){return wrap(encode());}
     private static byte[] wrap(byte[] control) {
-        byte[] management=write(out->{out.writeUInt32(1,1);out.writeByteArray(8,control);});
+        byte[] management=write(out->{out.writeUInt32(1,1);out.writeByteArray(ManagementEnvelopeFields.ADMIN_CONTROL,control);});
         byte[] envelope=write(out->{out.writeUInt32(1,3);out.writeByteArray(10,management);});if(envelope.length>1176)throw invalid();return envelope;
     }
     private static void tag(CodedInputStream in,int field,int type)throws IOException{if(in.readTag()!=(field<<3|type))throw invalid();}
@@ -94,7 +94,7 @@ public final class AdminControl {
         if(wire==null||wire.length>1176)throw invalid();
         try{var outer=CodedInputStream.newInstance(wire);if(number(outer,1)!=3)throw invalid();
             var management=CodedInputStream.newInstance(bytes(outer,10));if(!outer.isAtEnd()||number(management,1)!=1)throw invalid();
-            var message=decode(bytes(management,8));if(!management.isAtEnd()||!Arrays.equals(wire,message.envelope()))throw invalid();return message;
+            var message=decode(bytes(management,ManagementEnvelopeFields.ADMIN_CONTROL));if(!management.isAtEnd()||!Arrays.equals(wire,message.envelope()))throw invalid();return message;
         }catch(IOException malformed){throw invalid();}
     }
     public static boolean isEnvelope(byte[] wire){try{fromEnvelope(wire);return true;}catch(RuntimeException malformed){return false;}}

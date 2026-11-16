@@ -48,6 +48,30 @@ public final class SessionManager implements AutoCloseable {
     private long generation;
     private UdpEndpoint.CloseReason closeReason=UdpEndpoint.CloseReason.RUNNING;
     private long firstCalculations;
+    private CorePersistenceCoordinator coordinator;
+
+    /**
+     * 調整層を一度だけ接続する。回復には、まだ通信していない新しい管理を使う。
+     * <p>
+     * Attaches the coordinator once. Recovery uses a fresh manager that has not communicated.
+     */
+    synchronized void coordinate(CorePersistenceCoordinator coordinator,boolean recovering){
+        open();if(this.coordinator!=null||recovering&&(!routes.isEmpty()||!unconfirmed.isEmpty()))
+            throw new IllegalStateException("Coordinator requires a fresh session manager");
+        this.coordinator=coordinator;
+    }
+    private void requireHandshake(){if(coordinator!=null)coordinator.require(CorePersistenceCoordinator.Operation.HANDSHAKE);}
+    private void requirePeer(byte[] id){if(coordinator!=null&&coordinator.isRevoked(id))throw new SecurityException("Peer is revoked");}
+    synchronized long keyVersion(){return version;}
+    synchronized boolean matchesLocalRecipient(byte[] recipient,byte[] handshake){return Crypto.equal(localId,recipient)&&Crypto.equal(localPublic,handshake);}
+    synchronized boolean localRevoked(){return admin.revocations().hasEntry(localId);}
+    synchronized void storageFailed(){close();}
+    synchronized void rejectRevokedPeers(){
+        for(var entry:peers.entrySet())if(coordinator!=null&&coordinator.isRevoked(identity(entry.getValue().certificate))){
+            destroy(entry.getValue());entry.getValue().invalid=true;
+        }
+        for(var u:new ArrayList<>(unconfirmed.values()))if(coordinator!=null&&coordinator.isRevoked(u.nodeId))dropUnconfirmed(u);
+    }
 
     private static final class Peer {
         AdminRecords.Record certificate,authenticatedFirst;
@@ -135,12 +159,13 @@ public final class SessionManager implements AutoCloseable {
     private static byte[] identity(AdminRecords.Record cert) { return Crypto.blake2s(cert.field(0)); }
     private void open() { if(closed) throw new IllegalStateException("セッションの管理は閉じています"); }
     private Peer peer(byte[] id) {
-        Crypto.length(id,32);Peer p=peers.get(key(id));
+        Crypto.length(id,32);requirePeer(id);Peer p=peers.get(key(id));
         if(p==null || p.invalid) throw new SecurityException("有効な相手の証明書がありません");return p;
     }
     private void verify(byte[] encoded,byte[] handshakeKey) {
         var certificate=AdminRecords.decode(encoded);admin.verifyCertificate(certificate,handshakeKey);
         byte[] id=identity(certificate);
+        requirePeer(id);
         if(Crypto.equal(id,localId)) throw new SecurityException("自分とはセッションを張れません");
         Peer known=peers.get(key(id));
         if(known!=null) checkCertificateOrder(known,certificate);
@@ -254,6 +279,7 @@ public final class SessionManager implements AutoCloseable {
     public synchronized void rememberPeer(AdminRecords.Record certificate) {
         open();admin.verifyCertificate(certificate,certificate.field(1));
         byte[] id=identity(certificate);
+        requirePeer(id);
         if(Crypto.equal(id,localId)) throw new IllegalArgumentException("自分の証明書です");
         Peer p=peers.get(key(id));
         if(p==null) {
@@ -333,6 +359,7 @@ public final class SessionManager implements AutoCloseable {
     }
     private void firstSent(Peer p,long now) { p.attempt.lastFirst=now;p.attempt.sent=true; }
     private Outbound begin(Peer p) {
+        requireHandshake();requirePeer(identity(p.certificate));
         if(p.candidate!=null) throw new IllegalStateException("相手からの握手の確認待ちです");
         long now=ticker.getAsLong();
         if(!firstDue(p,now)) throw new IllegalStateException("次の1通目まで待ち、pollを呼んでください");
@@ -359,6 +386,7 @@ public final class SessionManager implements AutoCloseable {
      */
     synchronized Outbound startUnconfirmed(byte[] nodeId,byte[] handshakeKey) {
         open();Crypto.length(nodeId,32);Crypto.length(handshakeKey,32);refresh();open();
+        requireHandshake();requirePeer(nodeId);
         if(Crypto.equal(nodeId,localId)) throw new SecurityException("自分とはセッションを張れません");
         Peer known=peers.get(key(nodeId));
         if(known!=null) {
@@ -450,6 +478,7 @@ public final class SessionManager implements AutoCloseable {
      * 失効・未知の相手・閉鎖済みなら拒む。1176バイトを超える中身も状態を変えず拒む。
      */
     public synchronized SendResult sendWithStatus(byte[] peerId,byte[] plaintext) {
+        if(coordinator!=null)coordinator.requireData(plaintext);
         open();if(plaintext.length>SessionPacket.MAX_PLAINTEXT) throw new IllegalArgumentException("パケットの中身が長すぎます");
         refresh();open();Peer p=peer(peerId);List<Outbound> out=new ArrayList<>();
         if(p.active==null) {
@@ -473,6 +502,7 @@ public final class SessionManager implements AutoCloseable {
     /** UDPのpinを、証明書の検査後・時刻と相手の採用前に確かめる。 */
     synchronized Received receive(byte[] wire,java.util.function.Consumer<AdminRecords.Record> firstPeerCheck) {
         open();refresh();open();SessionPacket packet=SessionPacket.decode(wire);
+        requireHandshake();
         if(packet.kind()==SessionPacket.FIRST) return first(packet,wire,firstPeerCheck);
         Peer p=routes.get(key(packet.id()));
         if(p==null && packet.kind()==SessionPacket.SECOND) {
@@ -484,6 +514,9 @@ public final class SessionManager implements AutoCloseable {
         Connection c=matching(p.active,packet) ? p.active : matching(p.candidate,packet) ? p.candidate : null;
         if(c==null) throw new SecurityException("受け手の鍵がありません");
         byte[] plain=c.transport.receiveDatagram(packet.counter(),packet.body(),packet.header());
+        if(coordinator!=null&&plain.length!=0){
+            try{coordinator.requireData(plain);}catch(RuntimeException rejected){Crypto.wipe(plain);throw rejected;}
+        }
         authenticated(p);
         if(c==p.candidate) promote(p,c);
         return new Received(identity(p.certificate),plain,List.of(),packet.id());
@@ -616,6 +649,7 @@ public final class SessionManager implements AutoCloseable {
      */
     public synchronized List<Outbound> poll() {
         if(closed) return List.of();refresh();if(closed) return List.of();
+        if(coordinator!=null&&!coordinator.acceptsPackets())return List.of();
         long now=ticker.getAsLong();List<Outbound> out=new ArrayList<>();
         for(Peer p:peers.values()) {
             if(p.invalid) continue;
@@ -638,6 +672,7 @@ public final class SessionManager implements AutoCloseable {
      * 途中の試みの90秒と1通目の5秒間隔、古い転送鍵の期限は引き継ぐ。
      */
     public synchronized void rotateGroupKey(byte[] key,long nextVersion) {
+        if(coordinator!=null)coordinator.require(CorePersistenceCoordinator.Operation.KEY_APPLY);
         open();Crypto.length(key,32);if(nextVersion<=version) throw new IllegalArgumentException("グループの鍵の版が増えていません");
         refresh();open();byte[] next=key.clone();Crypto.wipe(psk);psk=next;version=nextVersion;long now=ticker.getAsLong();
         for(Peer p:peers.values()) {

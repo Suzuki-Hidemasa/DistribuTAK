@@ -96,7 +96,7 @@ public final class RenewalMessage {
         });
     }
     private static byte[] wrap(byte[] body) {
-        byte[] management=write(out->{out.writeUInt32(1,1);out.writeByteArray(9,body);});
+        byte[] management=write(out->{out.writeUInt32(1,1);out.writeByteArray(ManagementEnvelopeFields.CERTIFICATE_RENEWAL,body);});
         byte[] wire=write(out->{out.writeUInt32(1,3);out.writeByteArray(10,management);});
         if(wire.length>MAX_BYTES)throw invalid();return wire;
     }
@@ -124,7 +124,7 @@ public final class RenewalMessage {
         try {
             var outer=CodedInputStream.newInstance(wire);if(number(outer,1)!=3)throw invalid();
             var management=CodedInputStream.newInstance(bytes(outer,10));if(!outer.isAtEnd()||number(management,1)!=1)throw invalid();
-            var in=CodedInputStream.newInstance(bytes(management,9));if(!management.isAtEnd()||number(in,1)!=1)throw invalid();
+            var in=CodedInputStream.newInstance(bytes(management,ManagementEnvelopeFields.CERTIFICATE_RENEWAL));if(!management.isAtEnd()||number(in,1)!=1)throw invalid();
             long operation=number(in,2);if(operation<1||operation>3)throw invalid();var op=Operation.values()[(int)operation-1];
             byte[] group=bytes(in,3),request=bytes(in,4),member=bytes(in,5),admin=bytes(in,6),base=bytes(in,7),handshake=bytes(in,8);
             long reason=number(in,9);if(reason<1||reason>3)throw invalid();var why=Reason.values()[(int)reason-1];

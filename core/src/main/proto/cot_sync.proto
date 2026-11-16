@@ -86,6 +86,7 @@ message ManagementEnvelope {
     ManagementPage directory_summary_page = 7;
     AdminControl admin_control = 8;
     ProofCertificateRenewal certificate_renewal = 9;
+    RevocationsRecoveryRequest revocations_recovery_request = 10;
     ManagementPageAck page_ack = 11;
   }
 }
@@ -116,4 +117,11 @@ message AdminControl {
   uint32 schema=1; bytes group_id=2; bytes request_id=3; uint32 operation=4;
   bytes member_id=5; bytes admin_key=6; uint64 base_admin_version=7;
   bytes identity_signature=8; bytes possession_signature=9; bytes identity_key=10;
+}
+
+// 限定回復の専用要求。全項目を RevocationsRecoveryRequest で厳密に検査する。
+// Dedicated limited-recovery request. RevocationsRecoveryRequest strictly validates every field.
+message RevocationsRecoveryRequest {
+  uint32 schema = 1; bytes group_id = 2; bytes operation_id = 3;
+  uint64 required_revocation_version = 4; bytes target_R_digest = 5;
 }

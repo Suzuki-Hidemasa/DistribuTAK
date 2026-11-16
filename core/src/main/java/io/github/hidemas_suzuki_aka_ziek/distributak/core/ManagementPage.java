@@ -21,7 +21,8 @@ public final class ManagementPage {
     // Prefix for corruption detection with existing BLAKE2s, without a trailing NUL; never used for authentication or signatures.
     private static final byte[] LABEL="DistribuTAK/management-page/v1".getBytes(StandardCharsets.UTF_8);
     public enum Kind {
-        REVOCATION(1,3),ANNOUNCEMENT(2,5),ROSTER(3,4),ROSTER_SUMMARY(4,7);
+        REVOCATION(1,ManagementEnvelopeFields.REVOCATION_PAGE),ANNOUNCEMENT(2,ManagementEnvelopeFields.SIGNED_ANNOUNCEMENT),
+        ROSTER(3,ManagementEnvelopeFields.DIRECTORY_PAGE),ROSTER_SUMMARY(4,ManagementEnvelopeFields.DIRECTORY_SUMMARY_PAGE);
         private final int number,field;
         Kind(int number,int field){this.number=number;this.field=field;}
         public int number(){return number;}

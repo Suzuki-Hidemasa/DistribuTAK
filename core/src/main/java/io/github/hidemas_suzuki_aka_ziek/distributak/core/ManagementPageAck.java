@@ -14,7 +14,7 @@ import static io.github.hidemas_suzuki_aka_ziek.distributak.core.ManagementWire.
  * complete=1 only indicates that the receiver completed the whole object (or matched a remembered completion), and does not guarantee signature validity, authorization, or successful application.
  */
 public final class ManagementPageAck {
-    public static final int ENVELOPE_FIELD=11,MAX_INDICES=4;
+    public static final int ENVELOPE_FIELD=ManagementEnvelopeFields.PAGE_ACK,MAX_INDICES=4;
     private final byte[] group,operation,digest;
     private final int[] indices;
     private final boolean complete;

@@ -25,6 +25,7 @@ public final class AdminState {
     private byte[] anchorSignature;
     private AdminRecords.Record revocations;
     private List<byte[]> journal=new ArrayList<>();
+    private PreparedPersistence pendingPersistence;
     public AdminState(byte[] group, byte[] urlAdmin, Clock clock, AdminRecordStore store) {
         Crypto.length(group,32);Crypto.length(urlAdmin,32);
         this.group=group.clone();this.urlAdmin=urlAdmin.clone();this.clock=java.util.Objects.requireNonNull(clock);
@@ -286,6 +287,7 @@ public final class AdminState {
         List<byte[]> events=new ArrayList<>(journal);events.add(record.encode());return events;
     }
     private void save(List<byte[]> events, TreeMap<Long,AdminRecords.Record> records, byte[] anchor, AdminRecords.Record revoked) {
+        requireWritable();
         store.save(new AdminRecordStore.Snapshot(events,anchor,revoked==null ? null : revoked.encode(),records.lastKey(),revoked==null ? -1 : revoked.version()));
     }
     /**
@@ -308,6 +310,7 @@ public final class AdminState {
     }
     /** 完全に確かめてから状態を置き換える。読み戻した記録を検査せず採用しない。 */
     public synchronized void restore() {
+        requireWritable();
         if(!chain.isEmpty()) throw new IllegalStateException("起動後の読み戻しは1度だけです");
         var snapshot=store.load();if(snapshot==null) return;
         try {
@@ -348,8 +351,45 @@ public final class AdminState {
         var x=a.records();var y=b.records();if(x.size()!=y.size())return false;
         for(int i=0;i<x.size();i++)if(!java.util.Arrays.equals(x.get(i),y.get(i)))return false;return true;
     }
+    private void requireWritable(){
+        if(pendingPersistence!=null)throw new IllegalStateException("Management persistence is reserved");
+    }
+    /**
+     * 基準と候補を保存前に固定する。予約中の更新は待たせず断り、読み取りは止めない。
+     * <p>
+     * Fixes the base and candidate before persistence. Updates are refused during the reservation without blocking reads.
+     */
+    synchronized PreparedPersistence preparePersistence(AdminRecordStore.Snapshot expected,AdminState candidate){
+        requireWritable();
+        if(!sameSnapshot(snapshot(),expected))throw new SecurityException("候補の基準が変わりました");
+        pendingPersistence=new PreparedPersistence(candidate);return pendingPersistence;
+    }
+    /**
+     * 保存 I/O は管理状態のロックの外で実行し、確定後の公開には再検証や追加 I/O を要しない。
+     * <p>
+     * Runs persistence I/O outside the admin state lock; publishing after commit requires no revalidation or further I/O.
+     */
+    final class PreparedPersistence implements AutoCloseable {
+        private final AdminRecordStore.Snapshot next;
+        private final TreeMap<Long,AdminRecords.Record> nextChain;
+        private final byte[] nextAnchor;
+        private final AdminRecords.Record nextRevocations;
+        private final List<byte[]> nextJournal;
+        private boolean committed;
+        private PreparedPersistence(AdminState candidate){
+            next=candidate.snapshot();nextChain=new TreeMap<>(candidate.chain);nextAnchor=candidate.anchorSignature.clone();
+            nextRevocations=candidate.revocations;nextJournal=new ArrayList<>(candidate.journal);
+        }
+        void save(){store.save(next);committed=true;}
+        void publish(){synchronized(AdminState.this){
+            if(pendingPersistence!=this||!committed)throw new IllegalStateException("Persistence is not committed");
+            chain=nextChain;anchorSignature=nextAnchor;revocations=nextRevocations;journal=nextJournal;
+        }}
+        public void close(){synchronized(AdminState.this){if(pendingPersistence==this)pendingPersistence=null;}}
+    }
     /** callbackが成功し、基準が変わっていない候補だけを、一括で保存して適用する。 */
     synchronized void applyCandidate(AdminRecordStore.Snapshot expected,AdminState candidate,Runnable saved) {
+        requireWritable();
         if(!sameSnapshot(snapshot(),expected))throw new SecurityException("候補の基準が変わりました");
         saved.run();
         if(!sameSnapshot(snapshot(),expected))throw new SecurityException("保存中に候補の基準が変わりました");
@@ -367,5 +407,5 @@ public final class AdminState {
         byte[] handshake=Crypto.x25519Public(handshakeSecret);
         return AdminRecords.certificate(group,certificate.field(0),handshake,SignaturePurpose.identityProof(identitySecret,group,handshake),now,administratorSecret);
     }
-    public synchronized void clear() { store.clear();chain.clear();anchorSignature=null;revocations=null;journal.clear();legacyCertificates.clear(); }
+    public synchronized void clear() { requireWritable();store.clear();chain.clear();anchorSignature=null;revocations=null;journal.clear();legacyCertificates.clear(); }
 }
