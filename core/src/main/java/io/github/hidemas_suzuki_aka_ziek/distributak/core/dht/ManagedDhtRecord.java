@@ -5,6 +5,7 @@ import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.AdminRecords;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.Crypto;
+import io.github.hidemas_suzuki_aka_ziek.distributak.core.KeyAnnouncement;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.SignaturePurpose;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -32,6 +33,9 @@ public final class ManagedDhtRecord {
     private final Body body;
     private final byte[] payload,signature,encoded;
     private AdminRecords.Record decodedInner;
+    private KeyAnnouncement decodedAnnouncement;
+    /** 全体の大きさで選ぶ運び方。 / Transport selected by the complete encoded size. */
+    public enum Transport { STORE, TRANSFER }
     private ManagedDhtRecord(Body body,byte[] payload,byte[] signature) {
         this.body=body;this.payload=payload.clone();this.signature=signature.clone();
         encoded=encode(out->{out.writeByteArray(1,payload);out.writeByteArray(2,signature);});
@@ -80,9 +84,9 @@ public final class ManagedDhtRecord {
         };
     }
     /**
-     * 管理者の秘密の鍵で外側を作って署名する。種類 6 の内側はまだ扱わない。
+     * 管理者の秘密の鍵で外側を作って署名する。種類 6 は告知用のオーバーロードを使う。
      * <p>
-     * Builds and signs the outer layer with the administrator's secret key. The inner record of kind 6 is not handled yet.
+     * Builds and signs the outer layer with the administrator's secret key. Kind 6 uses the announcement overload.
      */
     public static ManagedDhtRecord issue(int kind,byte[] group,byte[] adminSecret,AdminRecords.Record inner,long publicationSeq,
                                           long adminVersion,byte[] adminDigest,long signedAt,byte[] recipientCertificate) {
@@ -97,6 +101,19 @@ public final class ManagedDhtRecord {
                 recipientCertificate==null?null:recipientCertificate.clone());
         shape(body);
         byte[] payload=canonical(body);
+        return new ManagedDhtRecord(body,payload,SignaturePurpose.DHT_MANAGEMENT.sign(adminSecret,payload));
+    }
+    /** 告知の外側を作って署名する。 / Builds and signs the outer layer of an announcement. */
+    public static ManagedDhtRecord issue(byte[] group,byte[] adminSecret,KeyAnnouncement inner,long publicationSeq,
+                                          long adminVersion,byte[] adminDigest,long signedAt) {
+        length(group,32);length(adminSecret,32);length(adminDigest,32);
+        if(inner==null||!Crypto.equal(inner.group(),group))throw rejected();
+        long expires;try{expires=Math.addExact(signedAt,DhtLimits.RECORD_LIFETIME_MILLIS);}catch(ArithmeticException overflow){throw rejected();}
+        byte[] subject=new byte[32];
+        var body=new Body(group.clone(),DhtKeys.KEY_ANNOUNCEMENT,DhtKeys.derive(group,DhtKeys.KEY_ANNOUNCEMENT,subject).bytes(),
+                Crypto.ed25519Public(adminSecret),inner.keyVersion(),signedAt,expires,subject,inner.encode(),publicationSeq,
+                adminVersion,adminDigest.clone(),null);
+        shape(body);byte[] payload=canonical(body);
         return new ManagedDhtRecord(body,payload,SignaturePurpose.DHT_MANAGEMENT.sign(adminSecret,payload));
     }
     private static void tag(CodedInputStream in,int field,int wire)throws IOException {
@@ -154,12 +171,16 @@ public final class ManagedDhtRecord {
     }
     private void checkInner() {
         AdminRecords.Kind expected=innerKind(body.kind);
-        if(expected==null)return;
+        if(expected==null){
+            var announcement=KeyAnnouncement.decode(body.inner);
+            if(!Crypto.equal(announcement.group(),body.group)||announcement.keyVersion()!=body.version||!announcement.hasValidSignature())throw rejected();
+            decodedAnnouncement=announcement;return;
+        }
         var inner=AdminRecords.decode(body.inner);
         if(inner.kind()!=expected||!Crypto.equal(inner.group(),body.group)||inner.version()!=body.version)throw rejected();
-        // 形式 1 は使わない（DTAK-9）。一覧は形式 2 だけ。鍵を包んだ記録には形式 2 がなく、そのまま扱う。
-        // Format 1 is not used (DTAK-9). Lists must be format 2; the wrapped-key record has no format 2 and is taken as is.
-        if(expected!=AdminRecords.Kind.WRAPPED_KEY&&inner.format()!=2)throw rejected();
+        // 新しい管理用記録は、包みを含めて形式 2 だけを使う。
+        // New managed records use format 2 only, including wrapped keys.
+        if(inner.format()!=2||!inner.hasValidSignature())throw rejected();
         if(body.kind==DhtKeys.WRAPPED_KEY&&!Crypto.equal(inner.field(0),body.subject))throw rejected();
         decodedInner=inner;
     }
@@ -167,6 +188,13 @@ public final class ManagedDhtRecord {
     public boolean hasValidSignature(){return SignaturePurpose.DHT_MANAGEMENT.verify(body.signer,payload,signature);}
     /** 通常の STORE に載る大きさか。 / Whether the record fits an ordinary STORE. */
     public boolean fitsStore(){return encoded.length<=MAX_STORE_BYTES;}
+    public Transport transport(){return fitsStore()?Transport.STORE:Transport.TRANSFER;}
+    /** 種類 6 の検査済みの告知。 / The checked announcement for kind 6. */
+    public KeyAnnouncement announcement(){
+        if(body.kind!=DhtKeys.KEY_ANNOUNCEMENT)return null;
+        if(decodedAnnouncement==null)decodedAnnouncement=KeyAnnouncement.decode(body.inner);
+        return decodedAnnouncement;
+    }
     /** 内側の記録。検査を通ったあとで使う。種類 6 は null。 / The inner record, for use after verification; null for kind 6. */
     public AdminRecords.Record inner() {
         if(decodedInner==null&&innerKind(body.kind)!=null)decodedInner=AdminRecords.decode(body.inner);

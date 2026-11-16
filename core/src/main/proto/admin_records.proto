@@ -30,6 +30,16 @@ message WrappedGroupKey {
   uint32 kind = 1; bytes group_id = 2; bytes signer = 3;
   uint64 version = 4; uint64 signed_at = 5;
   bytes recipient_id = 6; bytes handshake_key = 7; bytes enc = 8; bytes ciphertext = 9;
+  uint32 format = 15; bytes purpose = 16; bytes announcement_digest = 17;
+}
+
+// 告知の署名は KEY_ROTATION の既存の用途で包む。
+// Announcement signatures use the existing KEY_ROTATION purpose.
+message KeyAnnouncement {
+  uint32 schema = 1; bytes group_id = 2; bytes signer = 3;
+  uint64 key_version = 4; uint64 signed_at = 5; uint64 revocation_version = 6;
+  bytes revocation_digest = 7; bytes key_commitment = 8;
+  uint64 admin_version = 9; bytes admin_digest = 10;
 }
 
 message AdminBinding { bytes admin_key=1; uint32 state=2; bytes member_id=3; bytes possession_proof=4; }

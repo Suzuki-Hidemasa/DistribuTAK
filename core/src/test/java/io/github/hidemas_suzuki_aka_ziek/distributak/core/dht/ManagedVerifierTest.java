@@ -205,6 +205,81 @@ class ManagedVerifierTest {
         expect(ACCEPTED,judge(history(state.administratorsAt(1),2,1),null));
     }
 
+    // ---- 自己削除（種類 2・5） / self-removal (kinds 2 and 5) ----
+    @Test void selfRemovalIsAcceptedForLatestAndHistoryWithoutChangingTrust() {
+        var inner=list(1,NOW,1,2);
+        expect(ACCEPTED,judge(latestAdmins(inner,1,0),null));
+        expect(ACCEPTED,judge(history(inner,1,0),null));
+        assertEquals(0,state.administrators().version());
+    }
+    @Test void selfRemovalRequiresTheSameInnerAndOuterSigner() {
+        expect(INVALID,judge(latestAdmins(list(1,NOW,1,2),2,0),null));
+    }
+    @Test void selfRemovalRequiresTheExactPreviousDigest() {
+        var candidate=ManagedDhtRecord.issue(DhtKeys.LATEST_ADMINS,GROUP,secret(1),list(1,NOW,1,2),1,0,digest(99),NOW,null);
+        expect(INVALID,judge(candidate,null));
+    }
+    @Test void selfRemovalRequiresASignerInThePreviousList() {
+        expect(INVALID,judge(latestAdmins(list(1,NOW,3,2),3,0),null));
+    }
+    @Test void selfRemovalCannotRemoveTheLastAdministrator() {
+        assertThrows(IllegalArgumentException.class,()->list(1,NOW,1));
+    }
+    @Test void selfRemovalStoreRequiresTheAuthenticatedBoundMember() {
+        var candidate=latestAdmins(list(1,NOW,1,2),1,0);
+        var member=state.administrators().binding(pub(1)).memberId();
+        expect(ACCEPTED,verifier.judgeStore(candidate,null,member));
+        expect(INVALID,verifier.judgeStore(candidate,null,digest(99)));
+        expect(INVALID,verifier.judgeStore(candidate,null,null));
+        expect(INVALID,verifier.judgeStore(candidate,null,new byte[31]));
+    }
+    @Test void storeCannotUseAnUnknownAdministratorBinding() {
+        var first=AdminRecords.list(AdminRecords.Kind.ADMINS,GROUP,0,NOW-2000,java.util.List.of(pub(1),pub(2)),secret(1));
+        state=new AdminState(GROUP,pub(1),clock,new InMemoryAdminRecordStore());
+        state.bootstrap(first,AdminRecords.signAnchor(first,secret(1)));
+        verifier=new ManagedVerifier(new AdminStateTrust(state),clock);
+        expect(INVALID,verifier.judgeStore(latestAdmins(list(1,NOW,1,2),1,0),null,digest(99)));
+    }
+    @Test void anAcceptedSelfRemovalIsIdempotentAfterTheSignerIsRemoved() {
+        var inner=list(1,NOW,1,2);
+        var held=latestAdmins(inner,1,0);
+        assertTrue(state.acceptAdministrators(inner,v->fail()));
+        long expiry=held.expiresAt();
+        expect(DUPLICATE,judge(held,held));
+        expect(DUPLICATE,verifier.judgeStore(held,held,state.administratorsAt(0).binding(pub(1)).memberId()));
+        assertEquals(expiry,held.expiresAt());
+        expect(INVALID,judge(record(DhtKeys.LATEST_ADMINS,inner,1,2,0,NOW+1),held));
+        expect(INVALID,judge(record(DhtKeys.LATEST_ADMINS,inner,1,1,0,NOW),null));
+        expect(ACCEPTED,judge(record(DhtKeys.LATEST_ADMINS,inner,2,2,1,NOW+1),held));
+    }
+    @Test void selfRemovalCannotExtendCustodyBeforeTheListIsApplied() {
+        var inner=list(1,NOW,1,2);var held=latestAdmins(inner,1,0);
+        expect(DUPLICATE,judge(held,held));
+        expect(INVALID,judge(record(DhtKeys.LATEST_ADMINS,inner,1,2,0,NOW+1),held));
+    }
+    @Test void removedSignerCannotPublishADifferentSelfRemovalAtTheSameVersion() {
+        advance(1,1,2);
+        expect(INVALID,judge(latestAdmins(list(1,NOW,1,2,3),1,0),null));
+    }
+    @Test void removedSignerCannotSkipVersionsOrRestoreAPastSelfRemoval() {
+        advance(1,1,2);
+        expect(INVALID,judge(latestAdmins(list(3,NOW,1,2),1,0),null));
+        advance(2,2,2);
+        expect(INVALID,judge(history(list(1,NOW,1,2),1,0),null));
+    }
+    @Test void selfRemovalMustNameTheImmediatelyPreviousVersion() {
+        advance(1,1,1,2);
+        expect(INVALID,judge(latestAdmins(list(2,NOW,1,2),1,0),null));
+    }
+    @Test void removedSignerCanWinBackOnlyWithAChainedHigherLatestListContainingItself() {
+        advance(1,1,2);
+        var winner=list(1,NOW,1,1,2);
+        expect(ACCEPTED,judge(latestAdmins(winner,1,0),null));
+        expect(ACCEPTED,verifier.judgeStore(latestAdmins(winner,1,0),null,state.administratorsAt(0).binding(pub(1)).memberId()));
+        expect(INVALID,judge(history(winner,1,0),null));
+        expect(INVALID,judge(latestAdmins(list(1,NOW-2000,1,1,2),1,0),null));
+    }
+
     // ---- 対応しない種類 / unsupported kinds ----
     @Test void thisSliceDoesNotJudgeKeyKinds() {
         var announcement=ManagedDhtRecordTest.wrapped(1,NOW,DhtIdTest.id(55).bytes());

@@ -36,7 +36,7 @@ class ManagedDhtRecordTest {
         return AdminRecords.list(AdminRecords.Kind.ADMINS,GROUP,version,signedAt,keys,secret(1));
     }
     static AdminRecords.Record wrapped(long version,long signedAt,byte[] recipient) {
-        return AdminWrappedFixture.wrapped(GROUP,version,signedAt,recipient,digest(1),digest(2),new byte[48],secret(1));
+        return AdminRecords.wrapped(GROUP,version,signedAt,recipient,digest(1),digest(2),new byte[48],secret(1),digest(7));
     }
     static byte[] certificate() {
         return AdminRecords.certificate(GROUP,pub(7),digest(3),new byte[64],NOW,secret(1)).encode();
@@ -74,6 +74,26 @@ class ManagedDhtRecordTest {
         assertEquals(ManagedStatus.INVALID,e.status());assertEquals("管理記録を受け付けられません",e.getMessage());
     }
     static ManagedDhtRecord verify(byte[] wire){return ManagedDhtRecord.verifyStructure(wire,GROUP);}
+
+    @Test void legacyWrappedKeysAreRefusedInNewManagedRecords() {
+        byte[] member=DhtIdTest.id(55).bytes();
+        var legacy=AdminWrappedFixture.wrapped(GROUP,6,NOW,member,digest(1),digest(2),new byte[48],secret(1));
+        var record=ManagedDhtRecord.issue(DhtKeys.WRAPPED_KEY,GROUP,secret(1),legacy,1,3,digest(5),NOW,certificate());
+        reject(()->verify(record.encode()));
+    }
+    @Test void announcementsRoundTripAndMatchTheOuterGroupAndVersion() {
+        var inner=io.github.hidemas_suzuki_aka_ziek.distributak.core.KeyAnnouncement.issue(GROUP,secret(1),8,NOW,3,digest(4),digest(6),2,digest(5));
+        var record=ManagedDhtRecord.issue(GROUP,secret(1),inner,1,2,digest(5),NOW);
+        assertArrayEquals(inner.encode(),verify(record.encode()).announcement().encode());
+        reject(()->verify(change(record,7,9L)));
+        reject(()->verify(change(record,11,new byte[]{1})));
+        reject(()->verify(change(record,15,certificate())));
+        assertEquals(ManagedDhtRecord.Transport.STORE,record.transport());
+    }
+    @Test void transportUsesTheEntireOuterRecordAtTheExactBoundary() {
+        assertEquals(ManagedDhtRecord.Transport.STORE,widest(7).transport());
+        assertEquals(ManagedDhtRecord.Transport.TRANSFER,widest(8).transport());
+    }
 
     // ---- 鍵・宛先・番号 / key, subject, numbers ----
     @Test void everyKindDerivesItsKeyAndSubjectAndRoundTrips() {
