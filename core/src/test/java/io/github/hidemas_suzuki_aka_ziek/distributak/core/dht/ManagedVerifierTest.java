@@ -293,4 +293,20 @@ class ManagedVerifierTest {
         assertTrue(state.acceptAdministrators(next,v->fail()));expect(ACCEPTED,judge(candidate,null));
     }
 
+    @Test void consecutiveAdministratorVersionsResolveInOneRetry() {
+        var one=list(1,NOW-100,1,1,2);
+        var two=list(2,NOW,1,1,2);
+        var first=latestAdmins(one,1,0);
+        var second=ManagedDhtRecord.issue(DhtKeys.LATEST_ADMINS,GROUP,secret(1),two,1,1,Crypto.blake2s(one.signedBytes()),NOW,null);
+        var pending=new ManagedPending(clock);
+        for(var r:java.util.List.of(first,second))assertTrue(pending.offer(r,ManagedVerdict.needsVersion(1)));
+        var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
+        var checked=pending.retry(verifier,held::get,result->{
+            assertTrue(state.acceptAdministrators(result.record().inner(),v->fail()));
+            held.put(result.record().key(),result.record());
+        });
+        assertEquals(java.util.List.of(first,second),checked.stream().map(ManagedPending.Checked::record).toList());
+        assertTrue(checked.stream().allMatch(r->r.verdict().status()==ACCEPTED));
+        assertEquals(2,state.administrators().version());assertEquals(0,pending.size());assertEquals(0,pending.bytes());
+    }
 }
