@@ -62,9 +62,10 @@ public final class DhtTransfers {
     }
     private static final class In {
         final DhtId peer;final byte[] session,id,digest,buffer;final DhtWire.TransferKind kind;final int total,count;
+        final long generation;final boolean managed;
         final boolean[] have;final TransferResources.Lease lease;int haveCount;long started,lastProgress;
-        In(DhtId peer,byte[] session,DhtWire.Message m,long now,TransferResources.Lease lease) {
-            this.lease=lease;
+        In(DhtId peer,byte[] session,DhtWire.Message m,long now,TransferResources.Lease lease,long generation,boolean managed) {
+            this.generation=generation;this.managed=managed;this.lease=lease;
             this.peer=peer;this.session=session.clone();id=m.transferId();digest=m.digest();kind=m.transferKind();
             total=m.totalBytes();count=m.count();buffer=new byte[total];have=new boolean[count];started=now;lastProgress=now;
         }
@@ -73,10 +74,12 @@ public final class DhtTransfers {
         final byte[] session,digest;final int count,total;final DhtWire.TransferKind kind;final long until;
         /** digest が合わなかった転送。重複の断片にも ACK を返さない。 */
         final boolean corrupt;
+        final long generation;final boolean managed;
         /** 完了後に返してよい全部受けたACKの残り数。送り手の送り直しの上限（断片ごとに最大 MAX_RETRIES+1 回）まで。 */
         int acksLeft;
         Done(In in,boolean corrupt,long until) {
             this.session=in.session.clone();this.digest=in.digest.clone();this.count=in.count;this.total=in.total;this.kind=in.kind;
+            this.generation=in.generation;this.managed=in.managed;
             this.corrupt=corrupt;this.until=until;this.acksLeft=in.count*(MAX_RETRIES+1);
         }
     }
@@ -96,6 +99,7 @@ public final class DhtTransfers {
     private final LongSupplier ticker;
     private final Random random;
     private final DhtTransferSink sink;
+    private final ManagedTransferSink managedSink;
     private final ValueGate gate;
     private final Limits limits;
     private final TransferResources resources;
@@ -117,6 +121,17 @@ public final class DhtTransfers {
      */
     public DhtTransfers(byte[] group,Sender sender,LongSupplier ticker,Random random,DhtTransferSink sink,ValueGate gate,Limits limits,
             TransferResources resources) {
+        this(group,sender,ticker,random,sink,gate,limits,resources,null);
+    }
+
+    /**
+     * 管理用の渡し先を追加する。旧入口は引き続き旧渡し先だけに渡す。
+     * <p>
+     * Adds a managed sink; the legacy entry continues to use only the legacy sink.
+     */
+    public DhtTransfers(byte[] group,Sender sender,LongSupplier ticker,Random random,DhtTransferSink sink,ValueGate gate,Limits limits,
+            TransferResources resources,ManagedTransferSink managedSink) {
+        this.managedSink=managedSink;
         this.group=Objects.requireNonNull(group).clone();this.sender=Objects.requireNonNull(sender);this.ticker=Objects.requireNonNull(ticker);
         this.random=Objects.requireNonNull(random);this.sink=sink;this.gate=Objects.requireNonNull(gate);this.limits=Objects.requireNonNull(limits);
         this.resources=Objects.requireNonNull(resources);
@@ -125,6 +140,7 @@ public final class DhtTransfers {
     static byte[] digestOf(byte[] data) {
         return Crypto.blake2s(Crypto.concat(LABEL,data));
     }
+
 
     /** 送り始める。自分で転送の番号を作る。断られたら null。 */
     public byte[] start(DhtId peer,byte[] session,DhtWire.TransferKind kind,byte[] data) {
@@ -148,10 +164,23 @@ public final class DhtTransfers {
 
     /** 認証済みの相手から来た TRANSFER・TRANSFER_ACK を処理する。 */
     public void receive(DhtId peer,byte[] session,DhtWire.Message m) {
+        receive(peer,session,0,m,false);
+    }
+
+    /**
+     * 世代を組立と完成済みの覚えに結び付け、管理用の全体を専用の渡し先へ渡す。
+     * <p>
+     * Binds assembly and completed-transfer memory to a generation and delivers managed whole records to their sink.
+     */
+    public void receive(DhtId peer,byte[] session,long generation,DhtWire.Message m) {
+        receive(peer,session,generation,m,managedSink!=null);
+    }
+
+    private void receive(DhtId peer,byte[] session,long generation,DhtWire.Message m,boolean managed) {
         Objects.requireNonNull(peer);Objects.requireNonNull(session);Objects.requireNonNull(m);
         long now=ticker.getAsLong();
         if(!admit(peer,now)){rateLimited=inc(rateLimited);return;}
-        if(m.op()==DhtWire.Op.TRANSFER)onPiece(peer,session,m,now);
+        if(m.op()==DhtWire.Op.TRANSFER)onPiece(peer,session,m,now,generation,managed);
         else if(m.op()==DhtWire.Op.TRANSFER_ACK)onAck(peer,session,m,now);
     }
 
@@ -285,13 +314,14 @@ public final class DhtTransfers {
     }
 
     // ---- 受け手 ----
-    private void onPiece(DhtId peer,byte[] session,DhtWire.Message m,long now) {
+    private void onPiece(DhtId peer,byte[] session,DhtWire.Message m,long now,long generation,boolean managed) {
+        if(managed&&(!Arrays.equals(group,m.groupId())||session.length!=16)){rejected=inc(rejected);return;}
         Key key=new Key(peer,m.transferId());
         Done finished=done.get(key);
         if(finished!=null) {
             // 完了後は、同じ転送の断片の重複に、全部受けたACKを返す（ACKが落ちたとき、送り手が失敗にしないため）。
             // 返す数には上限がある。壊れた転送には返さない。digest・総バイト数・種類が合うものにだけ返す。
-            if(now-finished.until<0&&!finished.corrupt&&Arrays.equals(finished.session,session)&&finished.count==m.count()
+            if(now-finished.until<0&&!finished.corrupt&&finished.managed==managed&&finished.generation==generation&&Arrays.equals(finished.session,session)&&finished.count==m.count()
                 &&finished.total==m.totalBytes()&&finished.kind==m.transferKind()&&Arrays.equals(finished.digest,m.digest())&&finished.acksLeft>0) {
                 finished.acksLeft--;
                 byte[] all=new byte[(m.count()+7)/8];
@@ -302,14 +332,14 @@ public final class DhtTransfers {
         }
         In in=ins.get(key);
         if(in==null) {
-            if(sink==null){unsupported=inc(unsupported);return;}
+            if(managed?managedSink==null:sink==null){unsupported=inc(unsupported);return;}
             if(m.transferKind()==DhtWire.TransferKind.VALUE&&!gate.expected(peer,m.transferId())){rejected=inc(rejected);return;}
             var lease=resources.acquire(peer,m.totalBytes());
             if(lease==null){rejected=inc(rejected);return;}
-            try{in=new In(peer,session,m,now,lease);}
+            try{in=new In(peer,session,m,now,lease,generation,managed);}
             catch(RuntimeException|Error failure){lease.close();throw failure;}
             reserved+=in.total;ins.put(key,in);
-        } else if(!Arrays.equals(in.session,session)||!Arrays.equals(in.digest,m.digest())||in.total!=m.totalBytes()||in.count!=m.count()||in.kind!=m.transferKind()) {
+        } else if(in.managed!=managed||in.generation!=generation||!Arrays.equals(in.session,session)||!Arrays.equals(in.digest,m.digest())||in.total!=m.totalBytes()||in.count!=m.count()||in.kind!=m.transferKind()) {
             mismatched=inc(mismatched);return;
         }
         int index=m.index();
@@ -341,7 +371,24 @@ public final class DhtTransfers {
         if(!ok){corrupt=inc(corrupt);return;}
         ack(in.peer,in.session,in.id,in.digest,in.count,bitmap(in));
         completedIn=inc(completedIn);
+        if(in.managed){
+            ManagedTransferResult result;
+            ManagedDhtRecord record;
+            try{record=ManagedDhtRecord.verifyStructure(in.buffer,group);}
+            catch(RuntimeException invalid){notifyManaged(in,ManagedTransferResult.REJECTED);return;}
+            var context=new ManagedTransferContext(in.peer,in.session,in.generation,in.id,record.key());
+            try{result=Objects.requireNonNull(managedSink.accept(context,record));}
+            catch(RuntimeException failed){result=ManagedTransferResult.FAILED;}
+            notifyManaged(in,result);return;
+        }
         try{sink.accept(in.peer,in.kind,in.buffer);}catch(RuntimeException ignored){/* 渡し先の失敗は転送の結果に影響しない */}
+    }
+    private void notifyManaged(In in,ManagedTransferResult result) {
+        try{managedSink.completed(in.peer,in.id.clone(),result);}
+        catch(RuntimeException ignored){
+            // 通知の失敗でも、解放済みの受信枠と配送 ACK は戻さない。
+            // A failed notification does not restore released receive resources or undo delivery ACKs.
+        }
     }
     private static long inc(long v){return v==Long.MAX_VALUE?v:v+1;}
     private void release(In in){in.lease.close();reserved-=in.total;}
