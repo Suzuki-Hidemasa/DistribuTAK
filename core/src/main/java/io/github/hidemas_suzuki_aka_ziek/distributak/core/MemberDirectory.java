@@ -49,6 +49,23 @@ public final class MemberDirectory {
     private Entry entry(AdminRecords.Record certificate){return new Entry(certificate,verifiedBindings());}
     public synchronized Entry get(byte[] member){var certificate=records.get(name(member));return certificate==null?null:entry(certificate);}
     public synchronized int size(){return records.size();}
+    /**
+     * 期限切れや失効後の項目も、正確な署名根拠として保存する。
+     * <p>
+     * Preserves expired and revoked entries as exact signed evidence for storage.
+     */
+    public synchronized List<byte[]> snapshot(){var result=new ArrayList<byte[]>();for(var certificate:records.values())result.add(certificate.encode());return List.copyOf(result);}
+    /**
+     * 保存済み名簿を一括復元する。期限切れや失効を通信へ許可しない。
+     * <p>
+     * Atomically restores a stored roster without authorizing expired or revoked entries for communication.
+     */
+    public synchronized void restoreSnapshot(List<byte[]> encoded){
+        var next=new TreeMap<String,AdminRecords.Record>();
+        for(byte[] bytes:encoded){var certificate=AdminRecords.decode(bytes);state.verifyStoredCertificateEvidence(certificate);
+            String key=name(Crypto.blake2s(certificate.field(0)));if(next.containsKey(key))throw new SecurityException("保存名簿が重複しています");put(next,certificate);}
+        records.clear();records.putAll(next);revision=Math.addExact(revision,1);
+    }
     public synchronized long revision(){return revision;}
     public synchronized List<Summary> summary(){var out=new ArrayList<Summary>();for(var cert:records.values())out.add(new Summary(Crypto.blake2s(cert.field(0)),cert.issuedAt(),Crypto.blake2s(cert.signedBytes())));return List.copyOf(out);}
     public synchronized Difference compare(Summary remote) {

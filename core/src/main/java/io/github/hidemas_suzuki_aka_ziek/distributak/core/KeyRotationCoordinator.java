@@ -35,11 +35,16 @@ public final class KeyRotationCoordinator implements AutoCloseable {
     }
     KeyRotationCoordinator(AdminState admin,SessionManager sessions,RevocationUnion union,byte[] administratorSecret,
             Clock wall,Clock deadlines,SecureRandom random,byte[] member,java.util.function.BooleanSupplier active){
+        this(admin,sessions,union,administratorSecret,wall,deadlines,random,member,active,null);
+    }
+    KeyRotationCoordinator(AdminState admin,SessionManager sessions,RevocationUnion union,byte[] administratorSecret,
+            Clock wall,Clock deadlines,SecureRandom random,byte[] member,java.util.function.BooleanSupplier active,CorePersistenceCoordinator shared){
         this.admin=Objects.requireNonNull(admin);this.sessions=Objects.requireNonNull(sessions);this.union=Objects.requireNonNull(union);
         this.wall=Objects.requireNonNull(wall);this.deadlines=Objects.requireNonNull(deadlines);this.random=Objects.requireNonNull(random);
         this.member=member==null?null:member.clone();this.active=Objects.requireNonNull(active);
         Crypto.length(administratorSecret,32);secret=administratorSecret.clone();group=admin.administrators().group();
-        persistence=new CorePersistenceCoordinator(admin,sessions,union,wall,deadlines);
+        if(shared!=null&&!shared.coordinates(admin,sessions,union))throw new IllegalArgumentException("Persistence sources differ");
+        persistence=shared==null?new CorePersistenceCoordinator(admin,sessions,union,wall,deadlines):shared;
         maxKey=sessions.keyVersion();maxRevocation=admin.revocations().version();
         var current=admin.announcement();if(current!=null){observedVersion=current.keyVersion();firstAnnouncement=current.signedBytes();}
     }
@@ -99,12 +104,15 @@ public final class KeyRotationCoordinator implements AutoCloseable {
     }
     public synchronized boolean pending(){reconcile();return pending;}
     private boolean tooEarly(long now){return operated&&(now<lastOperation||now-lastOperation<INTERVAL_MILLIS);}
-    public synchronized Result poll(List<AdminRecords.Record> recipients,CorePersistenceCoordinator.PersistenceHooks hooks){
-        requireAuthority();reconcile();if(!pending)return Result.IDLE;
-        long now=deadlines.millis();if(now<scheduledAt||now-scheduledAt<delay||tooEarly(now))return Result.WAITING;
+    public Result poll(List<AdminRecords.Record> recipients,CorePersistenceCoordinator.PersistenceHooks hooks){
+        synchronized(this){
+            requireAuthority();reconcile();if(!pending)return Result.IDLE;
+            long now=deadlines.millis();if(now<scheduledAt||now-scheduledAt<delay||tooEarly(now))return Result.WAITING;
+        }
         return issue(List.of(),recipients,hooks);
     }
-    public synchronized Result manual(List<byte[]> revoked,List<AdminRecords.Record> recipients,CorePersistenceCoordinator.PersistenceHooks hooks){
+    public Result manual(List<byte[]> revoked,List<AdminRecords.Record> recipients,CorePersistenceCoordinator.PersistenceHooks hooks){
+        synchronized(this){
         requireAuthority();
         for(byte[] subject:revoked){
             Crypto.length(subject,32);if(member!=null&&Crypto.equal(subject,member))throw new SecurityException("Cannot revoke own membership");
@@ -115,21 +123,35 @@ public final class KeyRotationCoordinator implements AutoCloseable {
         boolean known=!revoked.isEmpty();for(byte[] subject:revoked)if(!union.contains(subject))known=false;
         if(known&&!pending)return Result.IDLE;
         if(tooEarly(deadlines.millis()))return Result.TOO_EARLY;
+        }
         return issue(revoked,recipients,hooks);
     }
     private Result issue(List<byte[]> revoked,List<AdminRecords.Record> recipients,CorePersistenceCoordinator.PersistenceHooks hooks){
+        Objects.requireNonNull(hooks);final long version,revocationVersion;
+        recipients=List.copyOf(recipients);
+        var subjects=new TreeSet<byte[]>(AdminRecords::compareBytes);
+        synchronized(this){
+        requireAuthority();
         if(issuing)throw new IllegalStateException("Rotation is already being persisted");
+        if(tooEarly(deadlines.millis()))return Result.TOO_EARLY;
         if(maxKey==Long.MAX_VALUE||maxRevocation==Long.MAX_VALUE){pending=false;return Result.VERSION_LIMIT;}
-        var subjects=new TreeSet<byte[]>(AdminRecords::compareBytes);subjects.addAll(admin.revokedSubjects());subjects.addAll(union.subjects());
+        subjects.addAll(admin.revokedSubjects());subjects.addAll(union.subjects());
         for(byte[] subject:revoked){Crypto.length(subject,32);subjects.add(subject.clone());}
         if(subjects.size()>AdminRecords.MAX_ENTRIES)throw new AdminRecords.RevocationLimitException();
-        long version=++maxKey,revocationVersion=++maxRevocation;lastOperation=deadlines.millis();operated=true;
-        discardPublication();byte[] key=new byte[32];random.nextBytes(key);Publication candidate=null;issuing=true;
+        version=++maxKey;revocationVersion=++maxRevocation;lastOperation=deadlines.millis();operated=true;
+        discardPublication();issuing=true;
+        }
+        byte[] key=new byte[32];Publication candidate=null;
         try{
-            var body=AdminRecords.list(AdminRecords.Kind.REVOCATIONS,group,revocationVersion,wall.millis(),List.copyOf(subjects),secret);
+            hooks.reserveRotationVersions(version,revocationVersion);
+            final AdminRecords.Record body;final KeyAnnouncement announcement;
+            synchronized(this){
+            requireAuthority();if(maxKey!=version||maxRevocation!=revocationVersion)return Result.CANCELLED;
+            random.nextBytes(key);
+            body=AdminRecords.list(AdminRecords.Kind.REVOCATIONS,group,revocationVersion,wall.millis(),List.copyOf(subjects),secret);
             if(!union.covers(body))throw new SecurityException("Candidate omits the revocation union");
             var admins=admin.administrators();
-            var announcement=KeyAnnouncement.issue(group,secret,version,wall.millis(),body.version(),Crypto.blake2s(body.signedBytes()),
+            announcement=KeyAnnouncement.issue(group,secret,version,wall.millis(),body.version(),Crypto.blake2s(body.signedBytes()),
                 KeyAnnouncement.commitment(group,version,key),admins.version(),Crypto.blake2s(admins.signedBytes()));
             var wraps=new ArrayList<AdminRecords.Record>();var seen=new TreeSet<byte[]>(AdminRecords::compareBytes);
             for(var certificate:recipients){
@@ -138,12 +160,17 @@ public final class KeyRotationCoordinator implements AutoCloseable {
                 wraps.add(GroupKeyEnvelope.wrap(group,recipient,certificate.field(1),version,wall.millis(),key,secret,Crypto.blake2s(announcement.signedBytes())));
             }
             candidate=new Publication(this,body,announcement,wraps,CorePersistenceCoordinator.revocationDigest(List.copyOf(subjects)));
+            }
             if(!persistence.persistRotation(body,announcement,key,candidate,hooks))return Result.CANCELLED;
+            synchronized(this){
+            if(closed||!authorized())return Result.CANCELLED;
             publication=candidate;candidate=null;pending=false;
             handledUnion=unionStamp();handledFirst=firstAnnouncement;handledSecond=secondAnnouncement;
             observedVersion=version;firstAnnouncement=announcement.signedBytes();secondAnnouncement=null;
             return Result.PUBLISHED;
-        }finally{issuing=false;Crypto.wipe(key);if(candidate!=null)candidate.close();}
+            }
+        }catch(RuntimeException failure){return Result.CANCELLED;}
+        finally{synchronized(this){issuing=false;}Crypto.wipe(key);if(candidate!=null)candidate.close();}
     }
     /**
      * 保存済みで現在も有効な送信候補だけを返す。取消後に取得済み候補を使うことも断る。

@@ -61,12 +61,16 @@ public class RenewalFirstProgressTest {
         try(var member=new LanControllerHarness(disks[1],CotPort.NONE,wall)) {
             byte[] administrator;try(var saved=disks[0].load(wall)){administrator=saved.id();}
             if(!simultaneous)receiveOnly(member,administrator);
+            var gate=FirstPacketGate.install(member.endpoint());
+            try{
             try(var admin=new LanControllerHarness(disks[0],CotPort.NONE,wall)) {
             byte[] a=LanBehaviourWiringTest.group(admin).id(),m=LanBehaviourWiringTest.group(member).id();
             LanProofRenewalTest.until(()->admin.endpoint().isEstablished(m)&&member.endpoint().isEstablished(a),admin,member);
-            assertTrue(initiator(admin.endpoint(),m));assertNull(admin.endpoint().authenticatedFirstCertificate(m));
-            assertNotNull(LanBehaviourWiringTest.group(admin).pendingRenewal(m));
-            assertEquals(1,LanBehaviourWiringTest.group(admin).peerCertificate.format());
+            try{
+                assertTrue(initiator(admin.endpoint(),m));assertNull(admin.endpoint().authenticatedFirstCertificate(m));
+                assertNotNull(LanBehaviourWiringTest.group(admin).pendingRenewal(m));
+                assertEquals(1,LanBehaviourWiringTest.group(admin).peerCertificate.format());
+            }finally{gate.release();}
             // 試験からメンバーのstartを呼ばない。製品の処理だけでFIRSTと保存の確定を進める。
             LanProofRenewalTest.until(()->LanBehaviourWiringTest.group(admin).pendingRenewal(m)==null
                     &&(adopted||LanBehaviourWiringTest.group(member).certificate.format()==2),admin,member);
@@ -75,6 +79,7 @@ public class RenewalFirstProgressTest {
             assertTrue(Arrays.equals(LanBehaviourWiringTest.group(member).certificate.encode(),LanBehaviourWiringTest.group(admin).peerCertificate.encode()));
             assertFalse(disks[0].erased);assertFalse(disks[1].erased);
             }
+            }finally{gate.release();}
         }
     }
     static final class FirstTap {

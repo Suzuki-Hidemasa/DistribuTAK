@@ -69,4 +69,15 @@ class MemberDirectoryTest {
         var f=new AdminFormatTest();var state=f.state(1000);var old=AdminFormatTest.legacy(f.certificate(100),f.identity,f.secret);var directory=new MemberDirectory(state);
         assertThrows(SecurityException.class,()->directory.saved(old));state.trustStoredLegacyCertificate(old);assertTrue(directory.saved(old));
     }
+    @Test void snapshotRetainsExpiredAndRevokedCertificatesAndIsDefensive(){
+        try(var b=fixture.new Node(2)){
+            var directory=new MemberDirectory(b.state);directory.saved(b.cert);
+            b.state.acceptRevocations(AdminRecords.list(AdminRecords.Kind.REVOCATIONS,fixture.group,1,fixture.time.millis,List.of(b.id),fixture.admin));
+            fixture.time.advance(31*24*60*60);assertTrue(directory.validRecipients().isEmpty());
+            var restored=new MemberDirectory(b.state);restored.restoreSnapshot(directory.snapshot());assertEquals(1,restored.size());assertTrue(restored.validRecipients().isEmpty());
+            assertEquals(1,directory.snapshot().size());byte[] bytes=directory.snapshot().get(0);bytes[0]^=1;
+            assertArrayEquals(b.cert.encode(),directory.snapshot().get(0));
+        }
+    }
+
 }

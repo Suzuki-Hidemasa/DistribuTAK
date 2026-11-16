@@ -11,20 +11,38 @@ final class GroupStateStorage {
     private final SyncStateStorage.Source source,settingsSource;
     private final Consumer<String> log;
     private boolean large;
+    private VersionSixStorage six;
     GroupStateStorage(StateEnvelope envelope,StateEnvelope.AtomicTarget target,SyncStateStorage.Source source,
                       StateEnvelope.AtomicTarget settingsTarget,SyncStateStorage.Source settingsSource,Consumer<String> log) {
         this.envelope=envelope;this.target=target;this.source=source;this.settingsTarget=settingsTarget;this.settingsSource=settingsSource;this.log=log;
     }
+    GroupStateStorage(StateEnvelope envelope,StateEnvelope.AtomicTarget target,SyncStateStorage.Source source,
+                      StateEnvelope.AtomicTarget settingsTarget,SyncStateStorage.Source settingsSource,Consumer<String> log,
+                      ManagementFiles files,StopMarker marker){
+        this(envelope,target,source,settingsTarget,settingsSource,log);six=new VersionSixStorage(envelope,files,marker);
+    }
+    io.github.hidemas_suzuki_aka_ziek.distributak.core.CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){
+        if(six==null)throw new IllegalStateException("管理保存先がありません");return six.hooks(group,target,()->writeSettings(group));
+    }
+    void saveDirectory(LanGroup group,io.github.hidemas_suzuki_aka_ziek.distributak.core.MemberDirectory directory,java.util.Map<String,String> labels)throws Exception{
+        if(six==null)throw new IllegalStateException("管理保存先がありません");
+        int size=six.saveDirectory(group,target,directory,labels);writeSettings(group);observeSize(size);six.cleanup(group);
+    }
+    void prepareNetwork(LanGroup group)throws Exception{if(six!=null)six.prepareNetwork(group);}
     private void diagnostic(String fixed){try{log.accept(fixed);}catch(RuntimeException ignored){}}
     LanGroup load(Clock clock)throws Exception {
         if(!source.exists())return null;
         byte[] wire=source.read(),plain=null;LanGroup group=null;
         try {
-            plain=envelope.open(wire);group=LanGroup.decode(plain,clock,true);
+            plain=envelope.open(wire);group=LanGroup.decode(plain,clock,true,six==null?null:six::read);
             StateSettings settings=readSettings();
             if(settings!=null)settings.check(group);
             if(settings==null||settings.saveSeq<group.saveSeq||settings.port!=group.port)writeSettings(group);
-            if(group.revokedPeerForgotten)try{save(group);}catch(Exception e){diagnostic("LAN_REVOKED_PEER_SAVE_FAILED");}
+            if(group.management!=null)six.inspect(group);else if(six!=null)six.inspectLegacy(group);
+            // 保存時の形で停止印を照合したあとに、失効相手と更新待ちを整理する。
+            // Clean up revoked peers and pending renewals after checking the marker against the saved shape.
+            group.forgetRevokedPeer();
+            if(group.revokedPeerForgotten&&!group.storageBlocked&&(six==null||group.management!=null))try{save(group);}catch(Exception e){diagnostic("LAN_REVOKED_PEER_SAVE_FAILED");}
             observeSize(wire.length);var result=group;group=null;return result;
         }finally{Crypto.wipe(wire);Crypto.wipe(plain);if(group!=null)group.close();}
     }
@@ -40,6 +58,7 @@ final class GroupStateStorage {
         catch(Exception e){diagnostic("LAN_SETTINGS_SAVE_FAILED");}
     }
     void save(LanGroup group)throws Exception {
+        if(six!=null){int size=six.save(group,target);writeSettings(group);observeSize(size);six.cleanup(group);return;}
         long previous=group.saveSeq;group.saveSeq=Math.addExact(previous,1);byte[] plain=null,wire=null;int size;
         try {
             plain=group.encode();wire=envelope.seal(plain);size=wire.length;
@@ -64,11 +83,13 @@ final class GroupStateStorage {
     private final class Pending implements LanRuntime.Pending {
         final LanGroup group;final long previous;final StagedState staged;final int size;final byte[] digest;
         boolean finished;
+        VersionSixStorage.Candidate candidate;
         Pending(LanGroup group,long previous,StagedState staged,int size,byte[] digest){this.group=group;this.previous=previous;this.staged=staged;this.size=size;this.digest=digest;}
         public void commit()throws Exception {
             if(finished)throw new IllegalStateException("仮の保存は確定か取消済みです");
             try{
-                byte[] current=group.encode();
+                if(candidate!=null&&!ManagementState.sameSnapshot(group.state.snapshot(),candidate.management.snapshot))throw new SecurityException("仮の管理状態が変わっています");
+                byte[] current=candidate==null?group.encode():group.encodeSix(candidate.management,candidate.management.generation,candidate.digest,null,group.keyVersion);
                 try{if(!Crypto.equal(digest,Crypto.blake2s(current)))throw new SecurityException("仮の保存の中身が変わっています");}
                 finally{Crypto.wipe(current);}
                 staged.commit();
@@ -77,22 +98,26 @@ final class GroupStateStorage {
                 if(!staged.committed()){group.saveSeq=previous;throw e;}
                 diagnostic("LAN_STAGING_CLEANUP_FAILED");
             }
-            finished=true;Crypto.wipe(digest);writeSettings(group);observeSize(size);
+            if(candidate!=null){six.stagedCommitted(group,candidate);candidate.close();candidate=null;}
+            finished=true;Crypto.wipe(digest);writeSettings(group);observeSize(size);if(six!=null)six.cleanup(group);
         }
         public void abort()throws Exception {
             if(finished)return;
-            try{staged.abort();}finally{group.saveSeq=previous;finished=true;Crypto.wipe(digest);}
+            try{staged.abort();}finally{group.saveSeq=previous;finished=true;Crypto.wipe(digest);if(candidate!=null){candidate.close();candidate=null;}}
         }
     }
     LanRuntime.Pending stage(LanGroup group,StateEnvelope.AtomicTarget temporary,StagedState.Read read,LanController.Action delete)throws Exception {
-        long previous=group.saveSeq;group.saveSeq=Math.addExact(previous,1);byte[] plain=null;
+        long previous=group.saveSeq;byte[] plain=null;VersionSixStorage.Candidate candidate=null;
         try {
-            plain=group.encode();int size=plain.length+StateEnvelope.HEADER_BYTES+12+16;
-            byte[] digest=Crypto.blake2s(plain);
+            if(six!=null)candidate=six.stage(group);
+            group.saveSeq=Math.addExact(previous,1);
+            byte[] check=candidate==null?group.encode():candidate.state.clone();byte[] digest;
+            try{digest=Crypto.blake2s(check);}finally{Crypto.wipe(check);}
+            plain=candidate==null?group.encode():candidate.state.clone();int size=plain.length+StateEnvelope.HEADER_BYTES+12+16;
             var staged=new StagedState(envelope,plain,temporary,read,delete,target);plain=null;
-            return new Pending(group,previous,staged,size,digest);
+            var result=new Pending(group,previous,staged,size,digest);result.candidate=candidate;candidate=null;return result;
         }catch(Exception e){group.saveSeq=previous;throw e;}
-        finally{Crypto.wipe(plain);}
+        finally{Crypto.wipe(plain);if(candidate!=null)candidate.close();}
     }
     void acceptRejoined(LanGroup previous,LanGroup candidate,java.util.concurrent.Future<?> future,LanRuntime.Pending staged)throws Exception {
         if(!(staged instanceof GroupStateStorage.Pending pending)||pending.group!=candidate)

@@ -17,11 +17,17 @@ final class LanGroup implements AutoCloseable {
     static int coreGroupSize(){return MAX_PEERS+1;}
     byte[] identitySecret,handshakeSecret,administratorSecret,groupKey,groupId,urlAdmin;
     long keyVersion,saveSeq;
+    long managementGeneration;
+    byte[] managementDigest;
+    ManagementState management;
+    boolean storageBlocked;
+    CorePersistenceCoordinator.RecoveryRequirement recoveryRequirement;
     /** この端末が DHT に出した記録の版。0 以上で、Long.MAX_VALUE-1 を上限とする（04 の 8.3）。他人の記録は保存しない。 */
     long dhtLocalVersion;
     int renewalCount;
     boolean syncInitialized;
     int port;
+    Clock clock;
     AdminState state;
     AdminRecords.Record certificate,peerCertificate;
     InetSocketAddress peerAddress,pendingAddress;
@@ -37,7 +43,7 @@ final class LanGroup implements AutoCloseable {
     static LanGroup create(int port,Clock clock,SecureRandom random) {
         LanGroup group=new LanGroup();
         try {
-            group.port=LanSupport.port(port,random);group.identitySecret=random(random);group.handshakeSecret=random(random);
+            group.clock=clock;group.port=LanSupport.port(port,random);group.identitySecret=random(random);group.handshakeSecret=random(random);
             group.administratorSecret=random(random);group.groupId=random(random);group.groupKey=random(random);
             group.urlAdmin=Crypto.ed25519Public(group.administratorSecret);
             group.state=new AdminState(group.groupId,group.urlAdmin,clock,new InMemoryAdminRecordStore());
@@ -54,7 +60,7 @@ final class LanGroup implements AutoCloseable {
     static LanGroup joined(int port,byte[] identity,byte[] handshake,byte[] urlAdmin,JoinHandshake.Joined joined,Clock clock) {
         LanGroup group=new LanGroup();
         try {
-            group.port=port;group.identitySecret=identity.clone();group.handshakeSecret=handshake.clone();group.administratorSecret=new byte[0];
+            group.clock=clock;group.port=port;group.identitySecret=identity.clone();group.handshakeSecret=handshake.clone();group.administratorSecret=new byte[0];
             group.groupKey=joined.groupKey();group.keyVersion=joined.groupKeyVersion();group.certificate=joined.certificate();
             group.groupId=group.certificate.group();group.urlAdmin=urlAdmin.clone();
             group.state=restore(group.groupId,group.urlAdmin,joined.state().snapshot(),clock);
@@ -66,6 +72,8 @@ final class LanGroup implements AutoCloseable {
         LanGroup group=joined(previous.port,previous.identitySecret,handshake,urlAdmin,joined,clock);
         try {
             group.administratorSecret=previous.administratorSecret.clone();group.saveSeq=previous.saveSeq;
+            group.management=previous.management;group.managementGeneration=previous.managementGeneration;
+            group.managementDigest=previous.managementDigest==null?null:previous.managementDigest.clone();
             group.renewalCount=previous.renewalCount;group.syncInitialized=previous.syncInitialized;group.dhtLocalVersion=previous.dhtLocalVersion;
             group.peerCertificate=previous.peerCertificate;group.peerAddress=previous.peerAddress;
             if(group.peerCertificate!=null)group.state.inheritStoredLegacyCertificate(previous.state,group.peerCertificate);
@@ -101,7 +109,8 @@ final class LanGroup implements AutoCloseable {
     void clearPendingPeer(){Crypto.wipe(pendingHandshake);pendingHandshake=null;pendingAddress=null;}
     UdpEndpoint.CloseReason localCertificateReason(){return state.localCertificateReason(certificate,Crypto.x25519Public(handshakeSecret));}
     private void validate(){validate(false);}
-    private void validate(boolean allowExpired) {
+    private void validate(boolean allowExpired) {validate(allowExpired,false);}
+    private void validate(boolean allowExpired,boolean savedCandidate) {
         if(closed)throw new IllegalStateException("グループは消去済みです");
         LanSupport.port(port,new SecureRandom());
         if(keyVersion<0 || saveSeq<0 || renewalCount<0 || dhtLocalVersion<0 || dhtLocalVersion==Long.MAX_VALUE || identitySecret.length!=32 || handshakeSecret.length!=32 || groupKey.length!=32 || groupId.length!=32
@@ -114,7 +123,10 @@ final class LanGroup implements AutoCloseable {
         if(isAdministrator()&&!state.administrators().hasEntry(Crypto.ed25519Public(administratorSecret)))
             throw new SecurityException("管理者の鍵が違います");
         if(peerCertificate!=null) {
-            state.verifyCertificate(peerCertificate,peerCertificate.field(1),allowExpired);
+            // 保存候補の失効相手は根拠だけを検証し、digest 照合後に取り除く。この緩和は版 6 の通常保存にも掛かり、残った失効相手は次の読み込みで消える。
+            // Verify only evidence for a revoked saved peer, removing it after digest verification. This relaxation also applies to ordinary version-6 saves; a remaining revoked peer is removed at the next load.
+            if(savedCandidate&&revokedPeer())state.verifyStoredCertificateEvidence(peerCertificate);
+            else state.verifyCertificate(peerCertificate,peerCertificate.field(1),allowExpired);
             if(Crypto.equal(certificate.field(0),peerCertificate.field(0)) || peerAddress==null
                     || LanSupport.selectIpv4(List.of(peerAddress.getAddress()))==null || peerAddress.getPort()==0)
                 throw new SecurityException("相手の記録が違います");
@@ -197,15 +209,20 @@ final class LanGroup implements AutoCloseable {
     private static byte[] key(DataInputStream in,int size)throws IOException {
         byte[] bytes=bytes(in);if(bytes.length!=size){Crypto.wipe(bytes);throw new IOException("鍵の長さが違います");}return bytes;
     }
-    byte[] encode()throws IOException {
-        validate(true);
+    byte[] encode()throws IOException {return encode(null,0,null,null,keyVersion);}
+    byte[] encodeSix(ManagementState candidate,long generation,byte[] digest,byte[] key,long version)throws IOException {
+        return encode(candidate,generation,digest,key,version);
+    }
+    private byte[] encode(ManagementState candidate,long generation,byte[] digest,byte[] key,long version)throws IOException {
+        validate(true,candidate!=null);
         try(var buffer=new WipingOutput();var out=new DataOutputStream(buffer)) {
-            out.writeInt(5);out.writeInt(port);bytes(out,identitySecret);bytes(out,handshakeSecret);bytes(out,administratorSecret);
-            bytes(out,groupKey);out.writeLong(keyVersion);bytes(out,groupId);bytes(out,urlAdmin);bytes(out,certificate.encode());
+            out.writeInt(candidate==null?5:6);out.writeInt(port);bytes(out,identitySecret);bytes(out,handshakeSecret);bytes(out,administratorSecret);
+            bytes(out,key==null?groupKey:key);out.writeLong(version);bytes(out,groupId);bytes(out,urlAdmin);bytes(out,certificate.encode());
+            if(candidate!=null){out.writeLong(generation);bytes(out,digest);}else{
             var snapshot=state.snapshot();var records=snapshot.records();out.writeInt(records.size());
             for(byte[] record:records)bytes(out,record);
             bytes(out,snapshot.anchorSignature());bytes(out,snapshot.revocations());
-            out.writeLong(snapshot.administratorVersion());out.writeLong(snapshot.revocationVersion());
+            out.writeLong(snapshot.administratorVersion());out.writeLong(snapshot.revocationVersion());}
             out.writeBoolean(peerCertificate!=null);
             if(peerCertificate!=null){bytes(out,peerCertificate.encode());bytes(out,peerAddress.getAddress().getAddress());out.writeInt(peerAddress.getPort());}
             out.writeBoolean(pendingHandshake!=null);
@@ -219,18 +236,28 @@ final class LanGroup implements AutoCloseable {
         }
     }
     static LanGroup decode(byte[] plain,Clock clock)throws IOException {return decode(plain,clock,false);}
-    static LanGroup decode(byte[] plain,Clock clock,boolean allowExpired)throws IOException {
+    interface ManagementLoader {ManagementState load(long generation,byte[] digest)throws Exception;}
+    static LanGroup decode(byte[] plain,Clock clock,boolean allowExpired)throws IOException {return decode(plain,clock,allowExpired,null);}
+    static LanGroup decode(byte[] plain,Clock clock,boolean allowExpired,ManagementLoader loader)throws IOException {
         if(plain.length>StateEnvelope.MAX_BYTES)throw new IOException("保存の上限を超えています");
         LanGroup group=new LanGroup();
         try(var in=new DataInputStream(new ByteArrayInputStream(plain))) {
-            int version=in.readInt();if(version<2||version>5)throw new IOException("保存した版が違います");
+            group.clock=clock;int version=in.readInt();if(version<2||version>6)throw new IOException("保存した版が違います");
             group.port=in.readInt();group.identitySecret=key(in,32);group.handshakeSecret=key(in,32);group.administratorSecret=bytes(in);
             group.groupKey=key(in,32);group.keyVersion=in.readLong();group.groupId=key(in,32);group.urlAdmin=key(in,32);
-            group.certificate=AdminRecords.decode(bytes(in));int count=in.readInt();
+            group.certificate=AdminRecords.decode(bytes(in));
+            if(version==6){
+                group.managementGeneration=in.readLong();group.managementDigest=key(in,32);
+                if(loader==null||group.managementGeneration<=0)throw new IOException("管理ファイルがありません");
+                try{group.management=loader.load(group.managementGeneration,group.managementDigest);}
+                catch(Exception e){throw new IOException("管理ファイルを検証できません",e);}
+                group.state=restore(group.groupId,group.urlAdmin,group.management.snapshot,clock);
+            }else{
+            int count=in.readInt();
             if(count<1 || count>in.available()/4)throw new IOException("記録の件数が違います");
             List<byte[]> records=new ArrayList<>();for(int i=0;i<count;i++)records.add(bytes(in));
             byte[] anchor=bytes(in),revoked=bytes(in);long admins=in.readLong(),revocations=in.readLong();
-            group.state=restore(group.groupId,group.urlAdmin,new AdminRecordStore.Snapshot(records,anchor,revoked,admins,revocations),clock);
+            group.state=restore(group.groupId,group.urlAdmin,new AdminRecordStore.Snapshot(records,anchor,revoked,admins,revocations),clock);}
             if(in.readBoolean()) {
                 group.peerCertificate=AdminRecords.decode(bytes(in));byte[] address=key(in,4);int port=in.readInt();
                 group.peerAddress=new InetSocketAddress(InetAddress.getByAddress(address),port);
@@ -252,7 +279,9 @@ final class LanGroup implements AutoCloseable {
                         if(!seen.add(Hex.toHexString(id)))throw new SecurityException("更新の相手が重複しています");
                         if(encoded.length!=0) {
                             if(encoded[0]==10)group.state.trustStoredLegacyCertificate(AdminRecords.decode(encoded));
-                            group.rememberRenewal(id,encoded,encoded[0]==0);
+                            // 版 6 は期限切れの更新待ちも digest 照合のために残す（通信の許可にはならない）。
+                            // Version 6 also keeps expired pending renewals for digest verification (they grant no communication permission).
+                            group.rememberRenewal(id,encoded,version==6||encoded[0]==0);
                         }
                     }catch(RuntimeException e){if(encoded.length>0&&encoded[0]!=10)throw e;group.pendingRenewalFailure=UdpEndpoint.CloseReason.INTERNAL_FAILURE;group.removeRenewal(id);}
                     finally{Crypto.wipe(encoded);}
@@ -263,11 +292,14 @@ final class LanGroup implements AutoCloseable {
                 group.dhtLocalVersion=dht;
             }
             if(in.available()!=0)throw new IOException("保存した記録に余分な値があります");
-            group.forgetRevokedPeer();group.validate(allowExpired);return group;
+            if(group.management!=null)group.management.verify(group,clock);
+            if(version!=6)group.forgetRevokedPeer();
+            group.validate(allowExpired,version==6);return group;
         }catch(IOException|RuntimeException e){group.close();throw e;}
     }
+    private boolean revokedPeer(){return peerCertificate!=null&&state.revocations()!=null&&state.revokedSubjects().stream().anyMatch(id->Crypto.equal(id,Crypto.blake2s(peerCertificate.field(0))));}
     boolean forgetRevokedPeer(){
-        if(peerCertificate==null||state.revocations()==null||!state.revocations().hasEntry(Crypto.blake2s(peerCertificate.field(0))))return false;
+        if(!revokedPeer())return false;
         Crypto.wipe(removeRenewal(Crypto.blake2s(peerCertificate.field(0))));
         peerCertificate=null;peerAddress=null;revokedPeerForgotten=true;return true;
     }

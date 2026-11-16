@@ -215,7 +215,8 @@ class CorePersistenceCoordinatorTest {
             var c=coordinator(a);var store=(AdminRecordStore)SessionManagerTest.field(a.state,"store");
             assertFalse(c.persistLocalRevocations(revoked(b.id),hooks(a.sessions::forgetAllVolatile)));
             assertEquals(0,store.load().revocationVersion());assertEquals(0,a.state.revocations().version());
-            assertFalse(c.isRevoked(b.id));assertEquals(State.RUNNING,c.state());
+            assertFalse(c.isRevoked(b.id));assertEquals(State.STORAGE_FAILED,c.state());
+            assertEquals(StopReason.COMMITTED_NOT_APPLIED,c.stopReason());assertTrue(a.sessions.isClosed());assertEquals("",c.statusText());
         }
     }
     @Test void ownCandidateGenerationChangeDuringStoreStillPublishesCommittedRevocation(){

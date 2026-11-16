@@ -73,4 +73,33 @@ class LegacyAdministrationPeerTest {
             assertThrows(SecurityException.class,()->GroupAdministration.fromSaved(p.as,p.ca,p.a.identity,p.a.secret,f.admin,f.time,()->f.time.nanos,new java.security.SecureRandom(),p.cm));
         }
     }
+    @Test void savedBasisSurvivesOwnFormatTwoRenewalAndExpirationOfEvidence()throws Exception {
+        try(var p=new Pair()){
+            var basis=p.gm.legacyAdministratorBasis();assertEquals(2,basis.size());
+            f.time.advance(31*24*60*60);
+            var current=p.m.certificate(p.m.secret,f.time.millis());
+            try(var restored=new GroupAdministration(p.ms,current,p.m.identity,p.m.secret,null,f.time,()->f.time.nanos,new java.security.SecureRandom())){
+                restored.restoreLegacyAdministratorBasis(basis);
+                assertEquals(2,restored.legacyAdministratorBasis().size());
+                byte[] value=restored.legacyAdministratorBasis().get(0);value[0]^=1;
+                assertArrayEquals(basis.get(0),restored.legacyAdministratorBasis().get(0));
+            }
+        }
+    }
+    @Test void savedBasisRejectsWrongSignatureAndWrongOwnIdentity()throws Exception{
+        try(var p=new Pair()){
+            var basis=p.gm.legacyAdministratorBasis();byte[] bad=basis.get(1).clone();bad[bad.length-1]^=1;
+            assertThrows(SecurityException.class,()->p.gm.restoreLegacyAdministratorBasis(List.of(basis.get(0),bad)));
+            assertThrows(SecurityException.class,()->p.gm.restoreLegacyAdministratorBasis(List.of(p.co.encode(),basis.get(1))));
+        }
+    }
+    @Test void exactLegacyPermissionsExportWithoutAccumulatingDuplicates()throws Exception{
+        try(var p=new Pair()){
+            int before=p.ms.storedLegacyCertificates().size();p.ms.trustStoredLegacyCertificate(p.cm);p.ms.trustStoredLegacyCertificate(p.cm);
+            assertEquals(before,p.ms.storedLegacyCertificates().size());
+            byte[] original=p.ms.storedLegacyCertificates().get(0).clone();p.ms.storedLegacyCertificates().get(0)[0]^=1;
+            assertArrayEquals(original,p.ms.storedLegacyCertificates().get(0));
+        }
+    }
+
 }
