@@ -17,6 +17,18 @@ import java.util.TreeSet;
  * removed. When an addition would pass the limit, it is refused and no older revocation is discarded.
  */
 public final class RevocationUnion {
+    /**
+     * 信頼済み管理状態が履歴を当時の権限で再生した和を引き継ぐ。
+     * <p>
+     * Imports the union replayed by trusted admin state under the authority valid at receipt.
+     */
+    public synchronized void restore(io.github.hidemas_suzuki_aka_ziek.distributak.core.AdminState state){
+        if(pending!=null)throw new IllegalStateException("Revocation addition is reserved");
+        if(!java.util.Arrays.equals(state.administrators().encode(),trust.latest().encode()))throw new SecurityException("Management state differs");
+        var next=new TreeSet<byte[]>(AdminRecords::compareBytes);next.addAll(subjects);next.addAll(state.revokedSubjects());
+        if(next.size()>AdminRecords.MAX_ENTRIES)throw new AdminRecords.RevocationLimitException();
+        subjects.addAll(next);
+    }
     private final byte[] group;
     private final TrustedAdmins trust;
     private final SortedSet<byte[]> subjects=new TreeSet<>(AdminRecords::compareBytes);
@@ -96,6 +108,14 @@ public final class RevocationUnion {
      * @return 件数。The count.
      */
     public synchronized int size(){return subjects.size();}
+    /**
+     * 統合した一覧を作るために、受理済み対象の写しを返す。
+     * <p>
+     * Returns copies of accepted subjects for constructing a consolidated list.
+     */
+    public synchronized java.util.List<byte[]> subjects(){
+        var result=new java.util.ArrayList<byte[]>();for(byte[] subject:subjects)result.add(subject.clone());return java.util.List.copyOf(result);
+    }
 
     /**
      * 一覧が和の対象をすべて含むか（和を包含するか）。

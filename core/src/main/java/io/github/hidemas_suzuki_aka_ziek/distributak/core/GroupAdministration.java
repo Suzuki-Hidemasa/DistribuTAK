@@ -44,7 +44,10 @@ public final class GroupAdministration implements AutoCloseable {
     private final Clock clock;private final LongSupplier nanos;private final SecureRandom random;
     private final MemberDirectory directory;private final Map<String,Pending> pending=new HashMap<>();
     private byte[] administratorSecret,legacyAdministratorIdentity;private AdminRecords.Record certificate;
-    private boolean closed,stopped;
+    private volatile boolean closed,stopped;
+    private KeyRotationCoordinator rotations;
+    private SessionManager rotationSessions;
+    private io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.RevocationUnion rotationUnion;
     private final ProofRequests incomingProofs;
     private static final class AcceptedDelivery {
         final RenewalMessage message;final byte[] peer;
@@ -86,6 +89,20 @@ public final class GroupAdministration implements AutoCloseable {
     private void open(){if(closed||stopped)throw new IllegalStateException("管理操作は停止しています");}
     public synchronized boolean isAdministrator(){return !closed&&!stopped&&administratorSecret!=null&&state.administrators().hasEntry(Crypto.ed25519Public(administratorSecret));}
     private void requireAdministrator(){open();if(!isAdministrator())throw invalid();state.verifyCertificate(certificate,certificate.field(1));}
+    /**
+     * 手動操作と競合の統合で、同じ待機・番号予約を使う。
+     * <p>
+     * Shares delays and version reservations between manual operations and conflict consolidation.
+     */
+    public synchronized KeyRotationCoordinator rotations(SessionManager sessions,
+            io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.RevocationUnion union,Clock deadlines){
+        requireAdministrator();
+        if(rotations==null){
+            rotations=new KeyRotationCoordinator(state,sessions,union,administratorSecret,clock,deadlines,random,member,()->!closed&&!stopped);
+            rotationSessions=sessions;rotationUnion=union;
+        }else if(rotationSessions!=sessions||rotationUnion!=union)throw invalid();
+        return rotations;
+    }
     public synchronized AdminRecords.Record certificate(){return certificate;}
     /** 旧署名済み記録はそのままにし、自分の鍵だけの所持証明を上に重ねる。 */
     public synchronized List<AdminBinding> bindings() {
@@ -242,10 +259,30 @@ public final class GroupAdministration implements AutoCloseable {
         requireAdministrator();return AdminRecords.certificate(group,identity,handshake,proof,clock.millis(),administratorSecret);
     }
     public synchronized byte[] respondInvitation(JoinHandshake.Admin invitation,byte[] request,byte[] groupKey,long keyVersion) {
-        requireAdministrator();
-        try(var materials=new JoinHandshake.Materials(List.of(state.administrators()),state.revocations(),keyVersion,groupKey)) {
+        try(var materials=invitationMaterials(groupKey,keyVersion,null)){
             return invitation.respond(request,handshakeSecret,administratorSecret,materials);
         }
+    }
+    /**
+     * 現在の管理者だけが告知を保存し、R を包含する加入の材料を返す。使い終わった材料は呼び出し側が閉じる。
+     * <p>
+     * Only a current administrator saves the announcement and returns R-complete join materials. The caller closes the materials after use.
+     */
+    public synchronized JoinHandshake.Materials invitationMaterials(byte[] groupKey,long keyVersion,byte[] expectedIdentity){
+        requireAdministrator();
+        if(!state.coversRevocations(state.revocations()))throw new SecurityException("Invitation omits accepted revocations");
+        var current=state.announcement();
+        if(current!=null&&current.keyVersion()==keyVersion)current.checkKey(group,keyVersion,groupKey);
+        boolean reusable=false;
+        if(current!=null)try{state.verifyAnnouncement(current,state.revocations());current.checkKey(group,keyVersion,groupKey);reusable=true;}catch(SecurityException stale){reusable=false;}
+        if(!reusable){
+            var r=state.revocations();var a=state.administrators();
+            current=KeyAnnouncement.issue(group,administratorSecret,keyVersion,Math.max(r.signedAt(),a.signedAt()),r.version(),Crypto.blake2s(r.signedBytes()),
+                KeyAnnouncement.commitment(group,keyVersion,groupKey),a.version(),Crypto.blake2s(a.signedBytes()));
+            state.recordGroupKey(current,groupKey,keyVersion);
+        }
+        return expectedIdentity==null?JoinHandshake.Materials.verified(state,List.of(state.administrators()),keyVersion,groupKey)
+            :JoinHandshake.Materials.verified(state,List.of(state.administrators()),keyVersion,groupKey,expectedIdentity);
     }
     public synchronized Invitation invitation(byte[] address,int port,byte[] totpSecret) {
         requireAdministrator();return new Invitation(address,port,Crypto.x25519Public(handshakeSecret),Crypto.ed25519Public(administratorSecret),totpSecret,group);
@@ -462,9 +499,14 @@ public final class GroupAdministration implements AutoCloseable {
         var bytes=new java.io.ByteArrayOutputStream();byte[] list=state.administrators().encode();bytes.write(list,0,list.length);for(var binding:bindings()){byte[] value=binding.encode();bytes.write(value,0,value.length);}
         return Crypto.blake2s(bytes.toByteArray());
     }
-    @Override public synchronized void close() {
-        if(closed)return;incomingProofs.close();if(acceptedDelivery!=null){acceptedDelivery.close();acceptedDelivery=null;}for(var p:pending.values())p.close();pending.clear();directory.clear();
-        Crypto.wipe(administratorSecret);administratorSecret=null;Crypto.wipe(legacyAdministratorIdentity);legacyAdministratorIdentity=null;Crypto.wipe(identitySecret);Crypto.wipe(handshakeSecret);closed=true;
+    @Override public void close() {
+        KeyRotationCoordinator old;
+        synchronized(this){
+            if(closed)return;closed=true;old=rotations;
+            incomingProofs.close();if(acceptedDelivery!=null){acceptedDelivery.close();acceptedDelivery=null;}for(var p:pending.values())p.close();pending.clear();directory.clear();
+            Crypto.wipe(administratorSecret);administratorSecret=null;Crypto.wipe(legacyAdministratorIdentity);legacyAdministratorIdentity=null;Crypto.wipe(identitySecret);Crypto.wipe(handshakeSecret);
+        }
+        if(old!=null)old.close();
     }
     @Override public String toString(){return "Group administration";}
 }

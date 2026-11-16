@@ -132,19 +132,21 @@ class AdminRecordsFix1Test {
                 AdminRecords.signAnchor(initial,f.a),AdminRecords.initialRevocations(f.group,f.now,f.a)));
         assertThrows(IllegalStateException.class,joining::administrators);
     }
-    @Test void largeReissueAddsAndRemovesEntriesWithinFiveSeconds() {
-        var state=f.fresh();var previous=f.revocations(0,f.now,ids(0,65536),f.a);
-        // 自分は0を外して65536を足す。勝った側は65535を外して70000を足す。
-        var own=f.revocations(1,f.now,ids(1,65537),f.a);
-        List<byte[]> winnerIds=ids(0,65535);winnerIds.add(id(70000));
+    @Test void largeReissueUnionsEntriesWithinFiveSecondsWithoutRemovingRevocations() {
+        var state=f.fresh();var previous=f.revocations(0,f.now,ids(0,65534),f.a);
+        // 両管理者が別々に1件を足し、失効の和を上限内で統合する。
+        // Each administrator adds one different subject, merging the revocation union within its limit.
+        var own=f.revocations(1,f.now,ids(0,65535),f.a);
+        List<byte[]> winnerIds=ids(0,65534);winnerIds.add(id(70000));
         state.acceptRevocations(previous);state.acceptRevocations(f.revocations(1,f.now+1,winnerIds,f.b));
         long start=System.nanoTime();
         var result=assertTimeout(Duration.ofSeconds(5),()->state.reissue(previous,own,f.a));
         System.out.printf(Locale.ROOT,"65536項目の出し直し: %.1f ms%n",(System.nanoTime()-start)/1_000_000.0);
-        assertEquals(65536,result.entries().size());assertFalse(result.hasEntry(id(0)));assertFalse(result.hasEntry(id(65535)));
-        assertTrue(result.hasEntry(id(1)));assertTrue(result.hasEntry(id(65534)));assertTrue(result.hasEntry(id(65536)));assertTrue(result.hasEntry(id(70000)));
+        assertEquals(65536,result.entries().size());assertTrue(result.hasEntry(id(0)));assertTrue(result.hasEntry(id(65533)));
+        assertTrue(result.hasEntry(id(1)));assertTrue(result.hasEntry(id(65534)));assertTrue(result.hasEntry(id(70000)));
         assertEquals(2,result.version());state.acceptRevocations(result);
         // 失効の検索でも毎回の一覧の写しと並べ直しを避ける。
+        // Revocation lookups also avoid copying and sorting the list on every check.
         var certificate=f.certificate();byte[] peer=Crypto.x25519Public(f.handshake);
         assertTimeout(Duration.ofSeconds(5),()->{ for(int i=0;i<100;i++) state.verifyCertificate(certificate,peer); });
     }

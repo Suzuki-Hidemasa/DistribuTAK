@@ -11,10 +11,13 @@ class RejoinTest {
         var state=f.f.fresh();state.acceptAdministrators(f.chain().get(1),v->fail());return state;
     }
     @Test void sameKeyVersionRejoinsWithSameIdentityAndFreshHandshakeAndIdenticalRetry() {
-        var saved=saved();var before=saved.snapshot();
+        var saved=saved();var r=saved.revocations();var a=saved.administrators();
+        var announcement=KeyAnnouncement.issue(f.f.group,f.f.a,0,f.f.now,r.version(),Crypto.blake2s(r.signedBytes()),
+            KeyAnnouncement.commitment(f.f.group,0,f.groupKey),a.version(),Crypto.blake2s(a.signedBytes()));
+        saved.recordGroupKey(announcement,f.groupKey,0);var before=saved.snapshot();
         try(var invite=f.invitation();var admin=f.admin(invite);
-            var joiner=JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,saved,f.f.certificate(),0);
-            var material=JoinHandshake.Materials.rejoin(f.chain(),f.f.revocations(0,f.f.now,List.of(),f.f.a),0,f.groupKey,identity)) {
+            var joiner=JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,saved,f.f.certificate(),0,f.groupKey,announcement,saved.revokedSubjects());
+            var material=JoinHandshake.Materials.verified(saved,f.chain(),0,f.groupKey,identity)) {
             byte[] request=joiner.request(),reply=admin.respond(request,f.adminX,f.f.a,material);
             assertArrayEquals(reply,admin.respond(joiner.retry(),f.adminX,f.f.a,material));
             try(var result=joiner.receive(reply)) {

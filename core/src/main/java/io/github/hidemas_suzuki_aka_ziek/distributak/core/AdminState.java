@@ -24,7 +24,9 @@ public final class AdminState {
     private TreeMap<Long,AdminRecords.Record> chain=new TreeMap<>();
     private byte[] anchorSignature;
     private AdminRecords.Record revocations;
+    private KeyAnnouncement announcement;
     private List<byte[]> journal=new ArrayList<>();
+    private java.util.SortedSet<byte[]> revokedSubjects=new java.util.TreeSet<>(AdminRecords::compareBytes);
     private PreparedPersistence pendingPersistence;
     public AdminState(byte[] group, byte[] urlAdmin, Clock clock, AdminRecordStore store) {
         Crypto.length(group,32);Crypto.length(urlAdmin,32);
@@ -130,10 +132,68 @@ public final class AdminState {
         if(candidate.format()==1&&!history)return trustedLegacyList(candidate);
         if(revocations!=null&&candidate.format()<revocations.format())throw new SecurityException("失効の一覧の形式を戻せません");
         var administrators=administrators();candidate.verify(REVOCATIONS,group,administrators);checkFuture(candidate);
-        if(revocations!=null && !administrators.hasEntry(revocations.signer()) && candidate.version()<=revocations.version()) return false;
-        if(revocations!=null && AdminRecords.compare(candidate,revocations)<=0) return false;
+        boolean winner=revocations==null || (administrators.hasEntry(revocations.signer()) || candidate.version()>revocations.version())
+                && AdminRecords.compare(candidate,revocations)>0;
+        var subjects=new java.util.TreeSet<byte[]>(AdminRecords::compareBytes);subjects.addAll(revokedSubjects);
+        subjects.addAll(candidate.entries());
+        if(subjects.size()>AdminRecords.MAX_ENTRIES)throw new AdminRecords.RevocationLimitException();
+        if(!winner&&subjects.size()==revokedSubjects.size())return false;
         List<byte[]> events=append(candidate);
-        save(events,chain,anchorSignature,candidate);revocations=candidate;journal=events;return true;
+        var next=winner?candidate:revocations;
+        save(events,chain,anchorSignature,next);revocations=next;journal=events;revokedSubjects=subjects;return true;
+    }
+    /**
+     * 当時の権限で検証して受理した失効の和を返す。
+     * <p>
+     * Returns the union of revocations accepted under the authority valid at receipt.
+     */
+    public synchronized List<byte[]> revokedSubjects(){
+        var result=new ArrayList<byte[]>();for(byte[] subject:revokedSubjects)result.add(subject.clone());return List.copyOf(result);
+    }
+    /**
+     * 勝者の一覧とは別に、受理済みの失効の和を調べる。
+     * <p>
+     * Queries accepted revocations independently of the winning list.
+     */
+    synchronized boolean isRevoked(byte[] subject){return revokedSubjects.contains(subject);}
+    public synchronized KeyAnnouncement announcement(){return announcement;}
+    /**
+     * 告知の現在の権限と参照本体を検査する。
+     * <p>
+     * Checks the current authority and referenced bodies of an announcement.
+     */
+    public synchronized void verifyAnnouncement(KeyAnnouncement value,AdminRecords.Record body){
+        var admins=administrators();value.verify(group,admins.entries());body.verify(REVOCATIONS,group,admins);checkFuture(body);
+        long now=clock.millis();
+        if(value.signedAt()>now&&value.signedAt()-now>300_000||value.adminVersion()!=admins.version()
+                ||!Crypto.equal(value.adminDigest(),Crypto.blake2s(admins.signedBytes()))
+                ||value.revocationVersion()!=body.version()||!Crypto.equal(value.revocationDigest(),Crypto.blake2s(body.signedBytes())))
+            throw new SecurityException("Announcement references differ");
+    }
+    public synchronized boolean coversRevocations(AdminRecords.Record body){
+        for(byte[] subject:revokedSubjects)if(!body.hasEntry(subject))return false;return true;
+    }
+    /**
+     * 鍵に一致する告知だけを保存候補へ結ぶ。同版では順位と鍵を戻さない。
+     * <p>
+     * Binds only a matching announcement to the saved candidate. Neither rank nor key regresses at the same version.
+     */
+    synchronized void recordGroupKey(KeyAnnouncement value,byte[] key,long version){
+        requireWritable();verifyAnnouncement(value,revocations());value.checkKey(group,version,key);
+        if(!coversRevocations(revocations()))throw new SecurityException("Revocations omit accepted subjects");
+        if(announcement!=null&&(value.keyVersion()<announcement.keyVersion()||value.keyVersion()==announcement.keyVersion()
+                &&(!Crypto.equal(value.keyCommitment(),announcement.keyCommitment())||KeyAnnouncement.compare(value,announcement)<0)))
+            throw new SecurityException("Retained announcement cannot regress");
+        var next=new AdminRecordStore.Snapshot(journal,anchorSignature,revocations.encode(),chain.lastKey(),revocations.version(),value.encode());
+        store.save(next);announcement=value;
+    }
+    /**
+     * 保存済みの告知を、保存済みの鍵そのものと照合する。告知のない旧保存も読める。
+     * <p>
+     * Checks the saved announcement against the saved key itself. Legacy snapshots without announcements remain readable.
+     */
+    public synchronized void checkRestoredGroupKey(byte[] key,long version){
+        if(announcement!=null)announcement.checkKey(group,version,key);
     }
     /** この1か所で、失効一覧が使える状態かを判定する。 */
     public synchronized AdminRecords.Record revocations() {
@@ -218,7 +278,7 @@ public final class AdminState {
     /** 保存の復旧用。形・署名・結びつきは通常どおり検査し、運用上の状態だけを分ける。 */
     public synchronized StoredCertificateStatus storedCertificateStatus(AdminRecords.Record certificate,byte[] handshake) {
         verifyCertificateStructure(certificate,handshake,new CertificateChecks(),true);
-        if(revocations().hasEntry(Crypto.blake2s(certificate.field(0))))return StoredCertificateStatus.REVOKED;
+        if(revokedSubjects.contains(Crypto.blake2s(certificate.field(0))))return StoredCertificateStatus.REVOKED;
         long now;
         try{now=clock.millis();}catch(RuntimeException failure){return StoredCertificateStatus.CLOCK_FAILURE;}
         if(now<0||certificate.issuedAt()>now&&certificate.issuedAt()-now>300_000)return StoredCertificateStatus.CLOCK_FAILURE;
@@ -254,7 +314,7 @@ public final class AdminState {
         if(!cache.recordSignature) throw new CertificateInvalidException("管理記録の署名か宛先が違います");
         if(!administrators.hasEntry(certificate.signer())) throw new CertificateInvalidException("署名者が今の管理者に含まれていません");
         byte[] identity=certificate.field(0),handshake=certificate.field(1);
-        if(!recovery&&revoked.hasEntry(Crypto.blake2s(identity))) throw new CertificateInvalidException("メンバーは失効しています");
+        if(!recovery&&revokedSubjects.contains(Crypto.blake2s(identity))) throw new CertificateInvalidException("メンバーは失効しています");
         if(!Crypto.equal(handshake,peerHandshake)) throw new CertificateInvalidException("相手の握手の鍵が違います");
         if(!cache.identitySignature) throw new CertificateInvalidException("身元の鍵の署名が違います");
     }
@@ -288,7 +348,7 @@ public final class AdminState {
     }
     private void save(List<byte[]> events, TreeMap<Long,AdminRecords.Record> records, byte[] anchor, AdminRecords.Record revoked) {
         requireWritable();
-        store.save(new AdminRecordStore.Snapshot(events,anchor,revoked==null ? null : revoked.encode(),records.lastKey(),revoked==null ? -1 : revoked.version()));
+        store.save(new AdminRecordStore.Snapshot(events,anchor,revoked==null ? null : revoked.encode(),records.lastKey(),revoked==null ? -1 : revoked.version(),announcement==null?null:announcement.encode()));
     }
     /**
      * 入り直しの返事の鎖と失効一覧を、全体の検査が済んでから一度に採用する。
@@ -306,7 +366,7 @@ public final class AdminState {
         }
         checked.acceptRevocations(revoked,true);
         save(checked.journal,checked.chain,checked.anchorSignature,checked.revocations);
-        chain=checked.chain;anchorSignature=checked.anchorSignature;revocations=checked.revocations;journal=checked.journal;
+        chain=checked.chain;anchorSignature=checked.anchorSignature;revocations=checked.revocations;journal=checked.journal;revokedSubjects=checked.revokedSubjects;
     }
     /** 完全に確かめてから状態を置き換える。読み戻した記録を検査せず採用しない。 */
     public synchronized void restore() {
@@ -329,14 +389,27 @@ public final class AdminState {
                     || (checked.revocations==null ? -1 : checked.revocations.version())!=snapshot.revocationVersion()
                     || !java.util.Arrays.equals(snapshot.revocations(),checked.revocations==null ? null : checked.revocations.encode()))
                 throw new SecurityException("保存した版が一致しません");
-            chain=checked.chain;anchorSignature=checked.anchorSignature;revocations=checked.revocations;journal=checked.journal;
+            KeyAnnouncement savedAnnouncement=snapshot.announcement()==null?null:KeyAnnouncement.decode(snapshot.announcement());
+            if(savedAnnouncement!=null)checked.verifyStoredAnnouncement(savedAnnouncement);
+            chain=checked.chain;anchorSignature=checked.anchorSignature;revocations=checked.revocations;journal=checked.journal;revokedSubjects=checked.revokedSubjects;announcement=savedAnnouncement;
         } catch(IllegalArgumentException | ArithmeticException e) { throw new SecurityException("保存した管理記録を検証できません",e); }
+    }
+    private void verifyStoredAnnouncement(KeyAnnouncement value){
+        AdminRecords.Record admins=null,body=null;
+        for(byte[] raw:journal){
+            var record=AdminRecords.decode(raw);
+            if(record.kind()==ADMINS&&record.version()==value.adminVersion()&&Crypto.equal(Crypto.blake2s(record.signedBytes()),value.adminDigest()))admins=record;
+            if(record.kind()==REVOCATIONS&&record.version()==value.revocationVersion()&&Crypto.equal(Crypto.blake2s(record.signedBytes()),value.revocationDigest()))body=record;
+        }
+        if(admins==null||body==null)throw new SecurityException("Saved announcement references are missing");
+        value.verify(group,admins.entries());body.verify(REVOCATIONS,group,admins);
+        long now=clock.millis();if(value.signedAt()>now&&value.signedAt()-now>300_000)throw new ClockFailure();
     }
     /** 検査済みの公開記録だけを保存用の写しとして返す。 */
     public synchronized AdminRecordStore.Snapshot snapshot() {
         if(chain.isEmpty())throw new IllegalStateException("管理者の一覧がありません");
         return new AdminRecordStore.Snapshot(journal,anchorSignature,revocations==null ? null : revocations.encode(),
-                chain.lastKey(),revocations==null ? -1 : revocations.version());
+                chain.lastKey(),revocations==null ? -1 : revocations.version(),announcement==null?null:announcement.encode());
     }
     /** 公開記録の候補の検証に使う。保存と現在の状態を変更しない。 */
     synchronized AdminState fork() {
@@ -347,7 +420,8 @@ public final class AdminState {
     }
     static boolean sameSnapshot(AdminRecordStore.Snapshot a,AdminRecordStore.Snapshot b) {
         if(a.administratorVersion()!=b.administratorVersion()||a.revocationVersion()!=b.revocationVersion()
-                ||!java.util.Arrays.equals(a.anchorSignature(),b.anchorSignature())||!java.util.Arrays.equals(a.revocations(),b.revocations()))return false;
+                ||!java.util.Arrays.equals(a.anchorSignature(),b.anchorSignature())||!java.util.Arrays.equals(a.revocations(),b.revocations())
+                ||!java.util.Arrays.equals(a.announcement(),b.announcement()))return false;
         var x=a.records();var y=b.records();if(x.size()!=y.size())return false;
         for(int i=0;i<x.size();i++)if(!java.util.Arrays.equals(x.get(i),y.get(i)))return false;return true;
     }
@@ -375,15 +449,19 @@ public final class AdminState {
         private final byte[] nextAnchor;
         private final AdminRecords.Record nextRevocations;
         private final List<byte[]> nextJournal;
+        private final java.util.SortedSet<byte[]> nextSubjects;
+        private final KeyAnnouncement nextAnnouncement;
         private boolean committed;
         private PreparedPersistence(AdminState candidate){
             next=candidate.snapshot();nextChain=new TreeMap<>(candidate.chain);nextAnchor=candidate.anchorSignature.clone();
             nextRevocations=candidate.revocations;nextJournal=new ArrayList<>(candidate.journal);
+            nextSubjects=new java.util.TreeSet<>(AdminRecords::compareBytes);nextSubjects.addAll(candidate.revokedSubjects);
+            nextAnnouncement=candidate.announcement;
         }
         void save(){store.save(next);committed=true;}
         void publish(){synchronized(AdminState.this){
             if(pendingPersistence!=this||!committed)throw new IllegalStateException("Persistence is not committed");
-            chain=nextChain;anchorSignature=nextAnchor;revocations=nextRevocations;journal=nextJournal;
+            chain=nextChain;anchorSignature=nextAnchor;revocations=nextRevocations;journal=nextJournal;revokedSubjects=nextSubjects;announcement=nextAnnouncement;
         }}
         public void close(){synchronized(AdminState.this){if(pendingPersistence==this)pendingPersistence=null;}}
     }
@@ -396,6 +474,8 @@ public final class AdminState {
         var next=candidate.snapshot();store.save(next);
         chain=new TreeMap<>(candidate.chain);anchorSignature=candidate.anchorSignature.clone();
         revocations=candidate.revocations;journal=new ArrayList<>(candidate.journal);
+        revokedSubjects=new java.util.TreeSet<>(AdminRecords::compareBytes);revokedSubjects.addAll(candidate.revokedSubjects);
+        announcement=candidate.announcement;
     }
     /** 招待操作専用。形式1だけを更新し、同じミリ秒なら作らず待つ。 */
     public synchronized AdminRecords.Record prepareInvitationCertificate(AdminRecords.Record certificate,byte[] handshakeSecret,byte[] identitySecret,byte[] administratorSecret) {
@@ -407,5 +487,5 @@ public final class AdminState {
         byte[] handshake=Crypto.x25519Public(handshakeSecret);
         return AdminRecords.certificate(group,certificate.field(0),handshake,SignaturePurpose.identityProof(identitySecret,group,handshake),now,administratorSecret);
     }
-    public synchronized void clear() { requireWritable();store.clear();chain.clear();anchorSignature=null;revocations=null;journal.clear();legacyCertificates.clear(); }
+    public synchronized void clear() { requireWritable();store.clear();chain.clear();anchorSignature=null;revocations=null;announcement=null;journal.clear();revokedSubjects.clear();legacyCertificates.clear(); }
 }

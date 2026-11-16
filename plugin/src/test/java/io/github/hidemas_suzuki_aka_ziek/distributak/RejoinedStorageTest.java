@@ -24,12 +24,18 @@ public class RejoinedStorageTest {
         }
         Invitation invitation(){return new Invitation(new byte[]{(byte)192,(byte)168,1,10},54321,Crypto.x25519Public(admin.handshakeSecret),admin.urlAdmin,StoredUpdatesTest.key(73), admin.groupId);}
         JoinHandshake.Admin issuer(Invitation invite,Clock clock){return new JoinHandshake.Admin(invite,admin.state.administrators(),admin.state.snapshot().anchorSignature(),clock,()->0);}
-        JoinHandshake.Materials materials(){return new JoinHandshake.Materials(List.of(admin.state.administrators()),admin.state.revocations(),0,admin.groupKey);}
+        JoinHandshake.Materials materials(){return materials(null);}
+        JoinHandshake.Materials materials(byte[] expected){
+            try(var service=new GroupAdministration(admin.state,admin.certificate,admin.identitySecret,admin.handshakeSecret,
+                    admin.administratorSecret,StorageGroupTest.CLOCK,()->0,new SecureRandom())){
+                return service.invitationMaterials(admin.groupKey,admin.keyVersion,expected);
+            }
+        }
         LanGroup rejoin(Clock clock)throws Exception {
             byte[] handshake=StoredUpdatesTest.key(74);
             try(var invite=invitation();var issuer=issuer(invite,clock);
-                var joiner=JoinHandshake.Joiner.rejoin(invite,member.identitySecret,handshake,clock,member.state,member.certificate,member.keyVersion);
-                var material=JoinHandshake.Materials.rejoin(List.of(admin.state.administrators()),admin.state.revocations(),0,admin.groupKey,Crypto.ed25519Public(member.identitySecret))) {
+                var joiner=JoinHandshake.Joiner.rejoin(invite,member.identitySecret,handshake,clock,member.state,member.certificate,member.keyVersion,member.groupKey,member.state.announcement(),member.state.revokedSubjects());
+                var material=materials(Crypto.ed25519Public(member.identitySecret))) {
                 try(var joined=joiner.receive(issuer.respond(joiner.request(),admin.handshakeSecret,admin.administratorSecret,material))) {
                     return LanGroup.rejoined(member,handshake,admin.urlAdmin,joined,clock);
                 }

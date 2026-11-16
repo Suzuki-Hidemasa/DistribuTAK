@@ -60,7 +60,16 @@ public final class JoinHandshake {
         private final long keyVersion;
         private final byte[] groupKey;
         private byte[] expectedIdentity;
+        private KeyAnnouncement announcement;
+        private List<byte[]> requiredSubjects=List.of();
         private boolean closed;
+        /**
+         * 旧呼び出し用。R の包含を検査しないため、新しく発行する呼び出しは verified を使う。
+         * 旧返事を読み込めることは、この材料による新規発行を認めることとは別である。
+         * <p>
+         * For legacy callers. Does not check coverage of R; new issuance callers must use verified.
+         * Reading legacy responses is separate from authorizing new issuance using these materials.
+         */
         public Materials(List<AdminRecords.Record> chain,AdminRecords.Record revocations,long keyVersion,byte[] groupKey) {
             Crypto.length(groupKey,32);
             if(chain==null || chain.isEmpty() || chain.size()>MAX_CHAIN_RECORDS || keyVersion<0) throw new IllegalArgumentException("発行の材料が範囲外です");
@@ -71,15 +80,37 @@ public final class JoinHandshake {
             }
             this.chain=List.copyOf(chain);this.revocations=Objects.requireNonNull(revocations);this.keyVersion=keyVersion;this.groupKey=groupKey.clone();
         }
-        /** 入り直す身元を必須にした発行材料。新規加入の材料とは区別する。 */
+        /**
+         * 入り直す身元を必須にした旧呼び出し用の材料。R は検査しない。新しく発行する呼び出しは verified を使う。
+         * 旧返事を読み込めることは、この材料による新規発行を認めることとは別である。
+         * <p>
+         * Legacy materials requiring a rejoining identity. Does not check R; new issuance callers must use verified.
+         * Reading legacy responses is separate from authorizing new issuance using these materials.
+         */
         public static Materials rejoin(List<AdminRecords.Record> chain,AdminRecords.Record revocations,long keyVersion,byte[] groupKey,byte[] expectedIdentity) {
             if(expectedIdentity==null) throw new IllegalArgumentException("入り直す身元がありません");
             Crypto.length(expectedIdentity,32);
             var result=new Materials(chain,revocations,keyVersion,groupKey);result.expectedIdentity=expectedIdentity.clone();return result;
         }
+        /**
+         * 保存済みの告知と失効の和を発行材料へ結ぶ。和を欠く一覧では発行しない。
+         * <p>
+         * Binds a persisted announcement and revocation union to issuance materials. Lists omitting the union cannot be issued.
+         */
+        public static Materials verified(AdminState state,List<AdminRecords.Record> chain,long keyVersion,byte[] groupKey){
+            var announcement=state.announcement();var body=state.revocations();
+            if(announcement==null||!state.coversRevocations(body))throw new SecurityException("Persisted announcement and complete revocations required");
+            state.verifyAnnouncement(announcement,body);announcement.checkKey(body.group(),keyVersion,groupKey);
+            var result=new Materials(chain,body,keyVersion,groupKey);result.announcement=announcement;result.requiredSubjects=state.revokedSubjects();return result;
+        }
+        public static Materials verified(AdminState state,List<AdminRecords.Record> chain,long keyVersion,byte[] groupKey,byte[] expectedIdentity){
+            Crypto.length(expectedIdentity,32);var result=verified(state,chain,keyVersion,groupKey);result.expectedIdentity=expectedIdentity.clone();return result;
+        }
         private synchronized byte[] key() { if(closed) throw new IllegalStateException("発行の材料は消去済みです");return groupKey.clone(); }
         private synchronized Materials snapshot() {
-            if(closed) throw new IllegalStateException("発行の材料は消去済みです");return expectedIdentity==null ? new Materials(chain,revocations,keyVersion,groupKey) : rejoin(chain,revocations,keyVersion,groupKey,expectedIdentity);
+            if(closed) throw new IllegalStateException("発行の材料は消去済みです");
+            var result=expectedIdentity==null ? new Materials(chain,revocations,keyVersion,groupKey) : rejoin(chain,revocations,keyVersion,groupKey,expectedIdentity);
+            result.announcement=announcement;result.requiredSubjects=requiredSubjects;return result;
         }
         @Override public synchronized void close() { closed=true;Crypto.wipe(groupKey);chain=List.of();revocations=null; }
     }
@@ -150,13 +181,16 @@ public final class JoinHandshake {
                     if(!Crypto.equal(material.chain.get(0).encode(),anchor)) throw new SecurityException("保存した起点と違います");
                     checked=new AdminState(material.chain.get(0).group(),context.administrator,clock,new InMemoryAdminRecordStore());
                     checked.join(material.chain,anchorSignature,material.revocations);
+                    for(byte[] subject:material.requiredSubjects)if(!material.revocations.hasEntry(subject))throw new SecurityException("Issuance omits revocations");
                     if(!checked.administrators().hasEntry(context.administrator)) throw new SecurityException("招待した管理者は外されています");
                     var certificate=AdminRecords.certificate(material.chain.get(0).group(),request.identity,request.handshake,request.binding,clock.millis(),administratorSecret);
                     checked.verifyCertificate(certificate,request.handshake);
                     key=material.key();
-                    var wrapped=GroupKeyEnvelope.wrap(certificate.group(),Crypto.blake2s(request.identity),request.handshake,material.keyVersion,clock.millis(),key,administratorSecret);
+                    if(material.announcement!=null){checked.verifyAnnouncement(material.announcement,material.revocations);material.announcement.checkKey(certificate.group(),material.keyVersion,key);}
+                    var wrapped=GroupKeyEnvelope.wrap(certificate.group(),Crypto.blake2s(request.identity),request.handshake,material.keyVersion,clock.millis(),key,administratorSecret,
+                        material.announcement==null?null:Crypto.blake2s(material.announcement.signedBytes()));
                     List<byte[]> chain=new ArrayList<>();for(var record:material.chain) chain.add(record.encode());
-                    var response=new JoinMessages.Response(certificate.group(),chain,anchorSignature,material.revocations.encode(),certificate.encode(),wrapped.encode());
+                    var response=new JoinMessages.Response(certificate.group(),chain,anchorSignature,material.revocations.encode(),certificate.encode(),wrapped.encode(),material.announcement==null?null:material.announcement.encode());
                     ready=sealReply(response,context.id,digest,request.handshake,administratorSecret);outgoing=ready.clone();
                     beforeCommit.accept(key);
                     if(!verifier.consume(request.handshake,code)) throw new SecurityException("招待を使ったことにできません");
@@ -210,6 +244,10 @@ public final class JoinHandshake {
         private int retries;
         private byte[] savedGroup;
         private long savedAdministrators,savedRevocations,savedKeyVersion;
+        private byte[] savedKey;
+        private KeyAnnouncement savedAnnouncement;
+        private List<byte[]> savedSubjects=List.of();
+        private boolean checkedRejoin;
         public Joiner(Invitation invitation,byte[] identitySecret,byte[] handshakeSecret,Clock clock) {
             this.clock=Objects.requireNonNull(clock);this.invitationGroup=invitation.groupId();Crypto.length(handshakeSecret,32);Crypto.length(identitySecret,32);
             identity=Crypto.ed25519Public(identitySecret);handshake=Crypto.x25519Public(handshakeSecret);this.handshakeSecret=handshakeSecret.clone();
@@ -250,7 +288,23 @@ public final class JoinHandshake {
             var result=new Joiner(invitation,identitySecret,newHandshakeSecret,clock);
             if(!Crypto.equal(invitation.groupId(),administrators.group())){result.close();throw new SecurityException("招待のグループが違います");}
             result.savedGroup=administrators.group();result.savedAdministrators=administrators.version();
-            result.savedRevocations=revoked.version();result.savedKeyVersion=keyVersion;return result;
+            result.savedRevocations=revoked.version();result.savedKeyVersion=keyVersion;result.savedSubjects=saved.revokedSubjects();return result;
+        }
+        /**
+         * 同版の入り直しでは、手元の鍵と告知および受理済み失効を必須の照合材料として渡す。
+         * <p>
+         * Same-version rejoin requires the retained key, announcement and accepted revocations as comparison material.
+         */
+        public static Joiner rejoin(Invitation invitation,byte[] identitySecret,byte[] newHandshakeSecret,Clock clock,
+                AdminState saved,AdminRecords.Record previousCertificate,long keyVersion,byte[] key,KeyAnnouncement announcement,List<byte[]> subjects){
+            Crypto.length(key,32);saved.checkRestoredGroupKey(key,keyVersion);
+            if(announcement!=null)announcement.checkKey(saved.administrators().group(),keyVersion,key);
+            var union=new java.util.TreeSet<byte[]>(AdminRecords::compareBytes);union.addAll(saved.revokedSubjects());
+            for(byte[] subject:subjects){Crypto.length(subject,32);union.add(subject.clone());}
+            if(union.size()>AdminRecords.MAX_ENTRIES)throw new AdminRecords.RevocationLimitException();
+            var result=rejoin(invitation,identitySecret,newHandshakeSecret,clock,saved,previousCertificate,keyVersion);
+            result.savedKey=key.clone();result.savedAnnouncement=saved.announcement()==null?announcement:saved.announcement();
+            result.savedSubjects=List.copyOf(union);result.checkedRejoin=true;return result;
         }
         public synchronized byte[] request() {
             if(closed || started) throw new IllegalStateException("求めは作成済みか消去済みです");started=true;return requestPacket.clone();
@@ -289,10 +343,28 @@ public final class JoinHandshake {
                 checked.verifyCertificate(certificate,handshake);
                 if(!Crypto.equal(certificate.field(0),identity) || !Crypto.equal(certificate.field(1),handshake)) throw new SecurityException("自分あての証明書ではありません");
                 var wrapped=AdminRecords.decode(response.wrapped);
+                KeyAnnouncement announcement=response.announcement==null?null:KeyAnnouncement.decode(response.announcement);
+                if(announcement!=null){
+                    checked.verifyAnnouncement(announcement,checked.revocations());
+                    if(wrapped.format()!=2||wrapped.version()!=announcement.keyVersion()
+                            ||!Crypto.equal(wrapped.field(4),Crypto.blake2s(announcement.signedBytes())))throw new SecurityException("Join wrap is not bound to its announcement");
+                }
                 if(savedGroup!=null) {
                     if(wrapped.version()<savedKeyVersion) throw new SecurityException("入り直しの鍵の版が古すぎます");
+                    if((checkedRejoin||wrapped.version()==savedKeyVersion)&&announcement==null)throw new SecurityException("Rejoin announcement is required");
+                    for(byte[] subject:savedSubjects)if(!checked.revocations().hasEntry(subject))throw new SecurityException("Rejoin omits accepted revocations");
+                    if(wrapped.version()==savedKeyVersion){
+                        if(savedKey==null)throw new SecurityException("Retained key is required for equal-version rejoin");
+                        announcement.checkKey(savedGroup,savedKeyVersion,savedKey);
+                        if(savedAnnouncement!=null&&KeyAnnouncement.compare(announcement,savedAnnouncement)<0)throw new SecurityException("Announcement rank regressed");
+                    }
                     opened=checked.openRejoinedGroupKey(wrapped,Crypto.blake2s(identity),handshakeSecret,savedKeyVersion);
                 } else opened=checked.openGroupKey(wrapped,Crypto.blake2s(identity),handshakeSecret,-1);
+                byte[] key=opened.copy();
+                try{
+                    if(savedGroup!=null&&wrapped.version()==savedKeyVersion&&!Crypto.equal(savedKey,key))throw new SecurityException("Same-version key changed");
+                    if(announcement!=null){announcement.checkKey(response.group,wrapped.version(),key);checked.recordGroupKey(announcement,key,wrapped.version());}
+                }finally{Crypto.wipe(key);}
                 var joined=new Joined(checked,certificate,opened,wrapped.version());checked=null;opened=null;return joined;
             } finally {
                 Crypto.wipe(plain);Crypto.wipe(info);Crypto.wipe(prefix);Crypto.wipe(signed);
@@ -300,7 +372,7 @@ public final class JoinHandshake {
             }
         }
         public synchronized boolean isClosed() { return closed; }
-        @Override public synchronized void close() { closed=true;Crypto.wipe(handshakeSecret);Crypto.wipe(requestPacket);requestPacket=null; }
+        @Override public synchronized void close() { closed=true;Crypto.wipe(handshakeSecret);Crypto.wipe(savedKey);Crypto.wipe(requestPacket);requestPacket=null; }
     }
     /** 完全に検査した加入結果。groupKey の写しは呼び出し元が消す。 */
     public static final class Joined implements AutoCloseable {

@@ -157,7 +157,7 @@ class AdminStateTest {
         s.acceptAdministrators(admins(1,now,List.of(bp),a),v->fail());
         assertThrows(SecurityException.class,()->s.openGroupKey(wrapped,id,handshake,0));
     }
-    @Test void removedSignerRevocationsRemainAcrossRestartUntilNewerValidListArrives() {
+    @Test void removedSignerRevocationsRemainAcrossRestartAndNewerValidLists() {
         var store=new InMemoryAdminRecordStore();var s=fresh(store);
         byte[] id=Crypto.blake2s(Crypto.ed25519Public(identity));
         s.acceptRevocations(revocations(1,now,List.of(id),b));
@@ -167,7 +167,7 @@ class AdminStateTest {
         assertThrows(SecurityException.class,()->restarted.verifyCertificate(certificate(),Crypto.x25519Public(handshake)));
         assertThrows(SecurityException.class,()->restarted.acceptRevocations(revocations(2,now,List.of(),b)));
         restarted.acceptRevocations(revocations(2,now,List.of(),a));
-        restarted.verifyCertificate(certificate(),Crypto.x25519Public(handshake));
+        assertThrows(SecurityException.class,()->restarted.verifyCertificate(certificate(),Crypto.x25519Public(handshake)));
     }
     @Test void joinRequiresRevocationsAndAcceptsChainAndEmptyInitialListTogether() {
         var s=new AdminState(group,ap,clock,new InMemoryAdminRecordStore());
