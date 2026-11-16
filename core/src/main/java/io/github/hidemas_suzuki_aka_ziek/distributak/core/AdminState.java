@@ -348,6 +348,25 @@ public final class AdminState {
         var x=a.records();var y=b.records();if(x.size()!=y.size())return false;
         for(int i=0;i<x.size();i++)if(!java.util.Arrays.equals(x.get(i),y.get(i)))return false;return true;
     }
+    /**
+     * 保存予定の候補だけを保存する。稼働中の状態は clear の同期が済むまで変えない。
+     * <p>
+     * Persists only the prepared candidate. Live state stays unchanged until clear synchronization completes.
+     */
+    synchronized void persistPrepared(AdminRecordStore.Snapshot expected,AdminState candidate){
+        if(!sameSnapshot(snapshot(),expected))throw new SecurityException("候補の基準が変わりました");
+        store.save(candidate.snapshot());
+    }
+    /**
+     * 保存と clear が完了した候補を、追加の I/O なしで適用する。
+     * <p>
+     * Publishes a candidate after persistence and clear, without additional I/O.
+     */
+    synchronized void publishPrepared(AdminRecordStore.Snapshot expected,AdminState candidate){
+        if(!sameSnapshot(snapshot(),expected))throw new SecurityException("候補の基準が変わりました");
+        chain=new TreeMap<>(candidate.chain);anchorSignature=candidate.anchorSignature.clone();
+        revocations=candidate.revocations;journal=new ArrayList<>(candidate.journal);
+    }
     /** callbackが成功し、基準が変わっていない候補だけを、一括で保存して適用する。 */
     synchronized void applyCandidate(AdminRecordStore.Snapshot expected,AdminState candidate,Runnable saved) {
         if(!sameSnapshot(snapshot(),expected))throw new SecurityException("候補の基準が変わりました");

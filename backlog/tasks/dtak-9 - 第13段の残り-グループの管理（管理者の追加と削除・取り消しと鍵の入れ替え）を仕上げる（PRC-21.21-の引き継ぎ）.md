@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 00:24'
-updated_date: '2026-11-16 07:37'
+updated_date: '2026-11-16 08:10'
 labels:
   - stage-13
 dependencies: []
@@ -36,7 +36,7 @@ PRC-163 のタスク PRC-21.21（ADR 0030 答え 167 の第13段）の未了の�
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-第4回（核のみ）: 管理用DHT記録 ManagedDhtRecord（種類2〜6、外側/内側署名、DHT番号再計算）、共通検証器、同版競合・失効集合Rの比較、自己削除の例外、768B判定とTransfer境界、種類4の受け手証明書同梱（R3=A案）、3者試験。続く第5〜9回は DTAK-9 に残す。根拠: out/reviews/20261115-distributak-stage13/proposal-v3.md §3.1-3.3, §10、ADR 0030 答え208-214。
+第6a回（核のみ、ブランチ feat/dtak9-r6a-rotation-180s）: 保存中（PERSISTING）の一時停止の入口、回転の180秒の決まり（単調時計・保存の時間で延ばさない）、失効された対象だけ即閉じる、告知・包みは参照する失効の一覧の本体の取り寄せ後まで保留、保存失敗への遷移（STORAGE_FAILED）、U1の限定回復と revocations_recovery_request=10。範囲外: 6b（同版競合・Rの再発行・再参加）、第7回（停止の印の I/O・保存v6）、第8回（製品への配線）、plugin。根拠: out/reviews/20261115-distributak-stage13/proposal-v3.md §13（458行）・§7.3（303-350行）、docs/04 §4.5 を同じ変更で直す。続く第6b〜9回は DTAK-9 に残す。
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
