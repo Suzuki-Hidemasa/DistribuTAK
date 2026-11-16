@@ -72,24 +72,31 @@ final class JoinMessages {
         } finally { for(byte[] value:values) Crypto.wipe(value); }
     }
     static final class Response {
-        final byte[] group,anchor,revocations,certificate,wrapped;
+        final byte[] group,anchor,revocations,certificate,wrapped,announcement;
         final List<byte[]> chain;
         Response(byte[] group,List<byte[]> chain,byte[] anchor,byte[] revocations,byte[] certificate,byte[] wrapped) {
+            this(group,chain,anchor,revocations,certificate,wrapped,null);
+        }
+        Response(byte[] group,List<byte[]> chain,byte[] anchor,byte[] revocations,byte[] certificate,byte[] wrapped,byte[] announcement) {
             Crypto.length(group,32);Crypto.length(anchor,64);
             if(chain.isEmpty() || chain.size()>MAX_CHAIN) throw new IllegalArgumentException("管理者の鎖の長さが範囲外です");
             int total=2+size(2,group)+size(4,anchor);
             for(byte[] record:chain) { limit(record,AdminRecords.MAX_RECORD_BYTES);total=Math.addExact(total,size(3,record)); }
             for(byte[] record:List.of(revocations,certificate,wrapped)) limit(record,AdminRecords.MAX_RECORD_BYTES);
             total=Math.addExact(total,size(5,revocations)+size(6,certificate)+size(7,wrapped));
+            if(announcement!=null){limit(announcement,1024);total=Math.addExact(total,size(8,announcement));}
             if(total>MAX_RESPONSE) throw new IllegalArgumentException("入るための返事が上限を超えています");
             this.group=group.clone();this.anchor=anchor.clone();this.revocations=revocations.clone();this.certificate=certificate.clone();this.wrapped=wrapped.clone();
+            this.announcement=announcement==null?null:announcement.clone();
             List<byte[]> copy=new ArrayList<>();for(byte[] entry:chain) copy.add(entry.clone());this.chain=List.copyOf(copy);
         }
         byte[] encode() {
             int size=2+size(2,group)+size(4,anchor)+size(5,revocations)+size(6,certificate)+size(7,wrapped);
+            if(announcement!=null)size+=size(8,announcement);
             for(byte[] entry:chain) size+=size(3,entry);
             return JoinMessages.encode(size,out->{out.writeUInt32(1,2);out.writeByteArray(2,group);for(byte[] entry:chain) out.writeByteArray(3,entry);
-                out.writeByteArray(4,anchor);out.writeByteArray(5,revocations);out.writeByteArray(6,certificate);out.writeByteArray(7,wrapped);});
+                out.writeByteArray(4,anchor);out.writeByteArray(5,revocations);out.writeByteArray(6,certificate);out.writeByteArray(7,wrapped);
+                if(announcement!=null)out.writeByteArray(8,announcement);});
         }
     }
     static Response response(byte[] raw) {
@@ -102,7 +109,9 @@ final class JoinMessages {
                 byte[] entry=in.readByteArray();limit(entry,AdminRecords.MAX_RECORD_BYTES);chain.add(entry);next=in.readTag();
             }
             if(next!=34) throw new IllegalArgumentException("起点の署名がありません");
-            byte[] anchor=in.readByteArray();var result=new Response(group,chain,anchor,bytes(in,5),bytes(in,6),bytes(in,7));
+            byte[] anchor=in.readByteArray(),revocations=bytes(in,5),certificate=bytes(in,6),wrapped=bytes(in,7);
+            byte[] announcement=in.isAtEnd()?null:bytes(in,8);
+            var result=new Response(group,chain,anchor,revocations,certificate,wrapped,announcement);
             canonical(in,raw,result.encode());return result;
         } catch(IOException e) { throw new IllegalArgumentException("入るための返事が壊れています",e); }
     }

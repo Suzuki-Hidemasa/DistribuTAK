@@ -396,14 +396,21 @@ final class LanController implements AutoCloseable {
         }finally{Crypto.wipe(totp);Crypto.wipe(pixels);}
     });}
     private void register(Invitation value,long epoch) {
-        var issuer=new JoinHandshake.Admin(value,group.state.administrators(),group.state.snapshot().anchorSignature(),clock,runtime.nanos);
-        // providerは核のjoinスレッドで動く。固定した公開記録と、専用の秘密の写しを所有する。
-        byte[] handshake=group.handshakeSecret.clone(),admin=group.administratorSecret.clone(),psk=group.groupKey.clone();
-        var chain=List.of(group.state.administrators());var revocations=group.state.revocations();long version=group.keyVersion;
+        // provider は核の join スレッドで動く。告知を保存してから、公開記録と秘密の写しを固定する。
+        // The provider runs on the core join thread. Persist the announcement before fixing public records and secret copies.
         byte[] expected=group.peerCertificate==null?null:group.peerCertificate.field(0);
+        try(var administration=new GroupAdministration(group.state,group.certificate,group.identitySecret,group.handshakeSecret,
+                group.administratorSecret,clock,runtime.nanos,random);
+            var materials=administration.invitationMaterials(group.groupKey,group.keyVersion,expected)){
+            Objects.requireNonNull(materials);
+        }
+        var materialState=LanGroup.restore(group.groupId,group.urlAdmin,group.state.snapshot(),clock);
+        var issuer=new JoinHandshake.Admin(value,materialState.administrators(),materialState.snapshot().anchorSignature(),clock,runtime.nanos);
+        byte[] handshake=group.handshakeSecret.clone(),admin=group.administratorSecret.clone(),psk=group.groupKey.clone();
+        var chain=List.of(materialState.administrators());long version=group.keyVersion;
         try {
             invitation=endpoint.registerInvitation(issuer,()->new UdpEndpoint.JoinMaterials(handshake.clone(),admin.clone(),
-                    (expected==null?new JoinHandshake.Materials(chain,revocations,version,psk):JoinHandshake.Materials.rejoin(chain,revocations,version,psk,expected))),joined->enqueue(()->{
+                    (expected==null?JoinHandshake.Materials.verified(materialState,chain,version,psk):JoinHandshake.Materials.verified(materialState,chain,version,psk,expected))),joined->enqueue(()->{
                 if(epoch!=generation.get()||group==null)return;
                 try{
                     group.state.verifyCertificate(joined.certificate(),joined.handshakeKey());
@@ -450,7 +457,8 @@ final class LanController implements AutoCloseable {
                 // 未所有の口と鍵を片付けてから、前のグループで開き直す。
                 try{
                     reconnect.stop();stopNetwork();long epoch=generation.incrementAndGet();
-                    try{socket=selected.open(store.port());}catch(java.io.IOException e){throw new Unavailable("加入の口を開けません。ポートを確かめてください");}joiner=rejoin?JoinHandshake.Joiner.rejoin(value,identity,handshake,clock,previous.state,previous.certificate,previous.keyVersion):new JoinHandshake.Joiner(value,identity,handshake,clock);
+                    try{socket=selected.open(store.port());}catch(java.io.IOException e){throw new Unavailable("加入の口を開けません。ポートを確かめてください");}joiner=rejoin?JoinHandshake.Joiner.rejoin(value,identity,handshake,clock,previous.state,previous.certificate,previous.keyVersion,
+                            previous.groupKey,previous.state.announcement(),previous.state.revokedSubjects()):new JoinHandshake.Joiner(value,identity,handshake,clock);
                     UdpEndpoint next=new UdpEndpoint(socket,receiver(epoch),runtime.nanos,reason->closed(epoch,reason));
                     opened(next,selected);socketOwned=true;next.pinPeerAddress(remoteKey,address);joining=true;joinBegan=runtime.millis();
                     JoinOperation operation=new JoinOperation(identity,handshake,epoch);operation.previous=previous;operation.priorReconnect=prior;

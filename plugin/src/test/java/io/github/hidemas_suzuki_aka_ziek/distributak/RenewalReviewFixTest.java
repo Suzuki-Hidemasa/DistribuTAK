@@ -50,9 +50,8 @@ public class RenewalReviewFixTest {
     static LanGroup rejoin(RejoinedStorageTest.Fixture pair,LanGroup previous,Clock clock)throws Exception {
         byte[] handshake=StoredUpdatesTest.key(74);
         try(var invite=pair.invitation();var issuer=pair.issuer(invite,clock);
-            var joiner=JoinHandshake.Joiner.rejoin(invite,previous.identitySecret,handshake,clock,previous.state,previous.certificate,previous.keyVersion);
-            var material=JoinHandshake.Materials.rejoin(java.util.List.of(pair.admin.state.administrators()),pair.admin.state.revocations(),0,
-                    pair.admin.groupKey,Crypto.ed25519Public(previous.identitySecret));
+            var joiner=JoinHandshake.Joiner.rejoin(invite,previous.identitySecret,handshake,clock,previous.state,previous.certificate,previous.keyVersion,previous.groupKey,previous.state.announcement(),previous.state.revokedSubjects());
+            var material=pair.materials(Crypto.ed25519Public(previous.identitySecret));
             var joined=joiner.receive(issuer.respond(joiner.request(),pair.admin.handshakeSecret,pair.admin.administratorSecret,material))) {
             return LanGroup.rejoined(previous,handshake,pair.admin.urlAdmin,joined,clock);
         }

@@ -64,7 +64,7 @@ public final class SessionManager implements AutoCloseable {
     private void requirePeer(byte[] id){if(coordinator!=null&&coordinator.isRevoked(id))throw new SecurityException("Peer is revoked");}
     synchronized long keyVersion(){return version;}
     synchronized boolean matchesLocalRecipient(byte[] recipient,byte[] handshake){return Crypto.equal(localId,recipient)&&Crypto.equal(localPublic,handshake);}
-    synchronized boolean localRevoked(){return admin.revocations().hasEntry(localId);}
+    synchronized boolean localRevoked(){return admin.isRevoked(localId);}
     synchronized void storageFailed(){close();}
     synchronized void rejectRevokedPeers(){
         for(var entry:peers.entrySet())if(coordinator!=null&&coordinator.isRevoked(identity(entry.getValue().certificate))){
@@ -148,6 +148,7 @@ public final class SessionManager implements AutoCloseable {
     public SessionManager(AdminState admin,AdminRecords.Record localCertificate,byte[] localSecret,byte[] groupKey,
                           long groupKeyVersion,Clock clock,LongSupplier monotonicNanos,int groupSize) {
         Crypto.length(localSecret,32);Crypto.length(groupKey,32);
+        admin.checkRestoredGroupKey(groupKey,groupKeyVersion);
         if(groupKeyVersion<0 || groupSize<2 || groupSize>65536) throw new IllegalArgumentException("鍵の版か台数の上限が違います");
         this.admin=Objects.requireNonNull(admin);this.clock=Objects.requireNonNull(clock);ticker=Objects.requireNonNull(monotonicNanos);
         localPublic=Crypto.x25519Public(localSecret);admin.verifyCertificate(localCertificate,localPublic);
@@ -318,7 +319,7 @@ public final class SessionManager implements AutoCloseable {
         admin.verifyCertificate(certificate,p.certificate.field(1));
         if(!Crypto.equal(certificate.signer(),administratorPublic)
                 || !admin.administrators().hasEntry(administratorPublic)
-                || admin.revocations().hasEntry(localId)
+                || admin.isRevoked(localId)
                 || !Crypto.equal(certificate.field(0),p.certificate.field(0))
                 || certificate.issuedAt()<=p.certificate.issuedAt())throw new SecurityException("保存した更新の証明書が違います");
         if(p.renewal!=null && !Arrays.equals(p.renewal,encoded))throw new SecurityException("発行済みの更新は差し替えません");
@@ -333,7 +334,7 @@ public final class SessionManager implements AutoCloseable {
     }
     synchronized AdminRecords.Record removeRevokedPeer(byte[] peerId) {
         open();Crypto.length(peerId,32);
-        if(!admin.revocations().hasEntry(peerId)) throw new SecurityException("失効が確定していない相手は忘れません");
+        if(!admin.isRevoked(peerId)) throw new SecurityException("失効が確定していない相手は忘れません");
         Peer p=peers.remove(key(peerId));
         if(p!=null) { destroy(p);replay.remove(p.certificate.field(1)); }
         return p==null ? null : p.certificate;

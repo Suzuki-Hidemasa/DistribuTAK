@@ -28,6 +28,15 @@ public final class CorePersistenceCoordinator {
         default void clear(AdminRecordStore.Snapshot candidate){}
         default void saveKey(byte[] key,long version){throw new UnsupportedOperationException("Key persistence required");}
         /**
+         * 再発行の全候補を送信前に保存する。実ディスクでの一括保存は第7回で実装する。
+         * <p>
+         * Saves the complete reissue candidate before transmission. Atomic disk persistence is implemented in round seven.
+         */
+        default void saveRotation(AdminRecordStore.Snapshot candidate,byte[] key,long version){saveKey(key,version);save(candidate);}
+        default void saveRotation(KeyRotationCoordinator.SavedRotation candidate,byte[] key){
+            saveRotation(candidate.management(),key,candidate.keyVersion());
+        }
+        /**
          * 停止を通知する。このフックは例外を投げない。
          * <p>
          * Reports that communication stopped. This hook must not throw exceptions.
@@ -88,6 +97,7 @@ public final class CorePersistenceCoordinator {
         this.admin=Objects.requireNonNull(admin);this.sessions=Objects.requireNonNull(sessions);
         this.revocations=Objects.requireNonNull(revocations);this.wall=Objects.requireNonNull(wall);this.deadlines=Objects.requireNonNull(deadlines);
         group=admin.administrators().group();this.requirement=requirement;
+        revocations.restore(admin);
         recoveryPages=new ManagementPageAssembler(group,deadlines,new TransferResources());
         synchronized(sessions){
             state=requirement==null?State.RUNNING:State.RECOVERING_REVOCATIONS;recoveryStarted=deadlines.millis();
@@ -149,6 +159,12 @@ public final class CorePersistenceCoordinator {
     public boolean receiveRevocations(AdminRecords.Record candidate,PersistenceHooks hooks){return persist(candidate,hooks,true,false);}
     public boolean persistLocalRevocations(AdminRecords.Record candidate,PersistenceHooks hooks){return persist(candidate,hooks,false,false);}
     private boolean persist(AdminRecords.Record candidate,PersistenceHooks hooks,boolean received,boolean recovery){
+        return persist(candidate,hooks,received,recovery,null,null,null);
+    }
+    boolean persistRotation(AdminRecords.Record candidate,KeyAnnouncement announcement,byte[] key,KeyRotationCoordinator.Publication publication,PersistenceHooks hooks){
+        return persist(candidate,hooks,false,false,announcement,key,publication);
+    }
+    private boolean persist(AdminRecords.Record candidate,PersistenceHooks hooks,boolean received,boolean recovery,KeyAnnouncement announcement,byte[] key,KeyRotationCoordinator.Publication publication){
         Objects.requireNonNull(hooks);final AdminState prepared;final AdminRecordStore.Snapshot base,next;final long token,generation;
         final AdminState.PreparedPersistence persistence;final RevocationUnion.PreparedAddition addition;
         synchronized(sessions){
@@ -158,6 +174,7 @@ public final class CorePersistenceCoordinator {
             if(recovery&&(!requirement.covers(candidate)||!revocations.covers(candidate)))return false;
             base=admin.snapshot();prepared=admin.fork();boolean changed=prepared.acceptRevocations(candidate);
             if(!changed&&!recovery)return false;
+            if(announcement!=null)prepared.recordGroupKey(announcement,key,announcement.keyVersion());
             if(recovery&&(!requirement.covers(prepared.revocations())||!revocations.covers(prepared.revocations())))return false;
             next=prepared.snapshot();generation=sessions.generation();
             addition=revocations.prepareAddition(candidate);
@@ -179,7 +196,8 @@ public final class CorePersistenceCoordinator {
                 }
             }
             if(received)hooks.active(next);
-            hooks.save(next);
+            if(announcement==null)hooks.save(next);
+            else{byte[] borrowed=key.clone();try{hooks.saveRotation(publication.saved(next),borrowed);}finally{Crypto.wipe(borrowed);}}
             synchronized(sessions){
                 if(operation!=token||state!=State.PERSISTING||sessions.generation()!=generation||!AdminState.sameSnapshot(base,admin.snapshot()))
                     throw new IllegalStateException("Stale persistence before commit");
@@ -194,6 +212,7 @@ public final class CorePersistenceCoordinator {
                 persistence.publish();if(!received)addition.commit();
                 sessions.rejectRevokedPeers();sessions.refresh();
                 state=State.RUNNING;requirement=null;recoveryPages.clear();
+                if(announcement!=null)sessions.rotateGroupKey(key,announcement.keyVersion());
                 selfRevoked=sessions.localRevoked();
             }
             persistence.close();
@@ -265,7 +284,16 @@ public final class CorePersistenceCoordinator {
      */
     public KeyResult applyGroupKey(KeyAnnouncement announcement,AdminRecords.Record wrap,byte[] recipient,byte[] handshakeSecret,
             long expectedVersion,long expectedGeneration,PersistenceHooks hooks){
-        byte[] next=null;long token;final AdminRecordStore.Snapshot base;
+        return applyGroupKey(announcement,wrap,recipient,handshakeSecret,expectedVersion,expectedGeneration,hooks,copy->{});
+    }
+    /**
+     * 試験専用の観測フックへ鍵の写しを貸す。所有権は渡さず、処理が終われば消去する。
+     * <p>
+     * Lends the key copy to a test-only observation hook without transferring ownership; wipes it when processing ends.
+     */
+    KeyResult applyGroupKey(KeyAnnouncement announcement,AdminRecords.Record wrap,byte[] recipient,byte[] handshakeSecret,
+            long expectedVersion,long expectedGeneration,PersistenceHooks hooks,java.util.function.Consumer<byte[]> observer){
+        byte[] next=null;long token;final AdminRecordStore.Snapshot base;final AdminState prepared;
         synchronized(sessions){
             if(state!=State.RUNNING)return KeyResult.DEFERRED;
             sessions.refresh();if(sessions.isClosed()||sessions.generation()!=expectedGeneration||sessions.keyVersion()!=expectedVersion)return KeyResult.REJECTED;
@@ -280,20 +308,32 @@ public final class CorePersistenceCoordinator {
                 wrap.verify(AdminRecords.Kind.WRAPPED_KEY,group,admins);
                 if(wrap.signedAt()>wall.millis()+300_000)return KeyResult.REJECTED;
                 try(var opened=GroupKeyEnvelope.open(wrap,recipient,handshakeSecret,expectedVersion)){next=opened.copy();}
-                if(!Crypto.equal(KeyAnnouncement.commitment(group,wrap.version(),next),announcement.keyCommitment())){Crypto.wipe(next);return KeyResult.REJECTED;}
+                announcement.checkKey(group,wrap.version(),next);
+                observer.accept(next);
+                base=admin.snapshot();prepared=admin.fork();prepared.recordGroupKey(announcement,next,wrap.version());
             }catch(RuntimeException invalid){Crypto.wipe(next);return KeyResult.REJECTED;}
-            base=admin.snapshot();state=State.PERSISTING;token=++operation;
+            state=State.PERSISTING;token=++operation;
         }
         try{
             byte[] borrowed=next.clone();
             try{hooks.saveKey(borrowed,wrap.version());}finally{Crypto.wipe(borrowed);}
+            final AdminState.PreparedPersistence persistence;
             synchronized(sessions){
                 sessions.refresh();
                 if(state!=State.PERSISTING||operation!=token||sessions.isClosed()||sessions.generation()!=expectedGeneration
                         ||sessions.keyVersion()!=expectedVersion||!AdminState.sameSnapshot(base,admin.snapshot())){
                     if(operation==token)state=State.RUNNING;return KeyResult.STALE;
                 }
-                state=State.RUNNING;sessions.rotateGroupKey(next,wrap.version());return KeyResult.APPLIED;
+                persistence=admin.preparePersistence(base,prepared);
+            }
+            try(persistence){
+                persistence.save();
+                synchronized(sessions){
+                    if(operation!=token||state!=State.PERSISTING||sessions.isClosed()||sessions.generation()!=expectedGeneration){
+                        if(operation==token)state=State.RUNNING;return KeyResult.STALE;
+                    }
+                    persistence.publish();state=State.RUNNING;sessions.rotateGroupKey(next,wrap.version());return KeyResult.APPLIED;
+                }
             }
         }catch(RuntimeException failure){synchronized(sessions){if(operation==token)state=State.RUNNING;}return KeyResult.CANCELLED;}
         finally{Crypto.wipe(next);}

@@ -80,6 +80,16 @@ public final class KeyAnnouncement {
     }
     public boolean hasValidSignature(){return SignaturePurpose.KEY_ROTATION.verify(signer,payload,signature);}
     /**
+     * 受信・復元・入り直しで、手元の鍵と版への結び付きを同じ方法で照合する。
+     * <p>
+     * Checks the binding to the local key and version identically for receipt, restore and rejoin.
+     */
+    public void checkKey(byte[] expectedGroup,long version,byte[] key){
+        if(!Crypto.equal(group,expectedGroup)||keyVersion!=version||!hasValidSignature()
+                ||!Crypto.equal(keyCommitment,commitment(expectedGroup,version,key)))
+            throw new SecurityException("Key announcement does not match the retained key");
+    }
+    /**
      * 用途・グループ・版を結んだ既存の BLAKE2s の入力。
      * <p>
      * Existing BLAKE2s input binding purpose, group and version.

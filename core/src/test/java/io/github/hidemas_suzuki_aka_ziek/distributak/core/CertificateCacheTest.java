@@ -23,7 +23,7 @@ class CertificateCacheTest {
             for(int i=0;i<10;i++)assertThrows(SecurityException.class,()->a.state.verifyCertificateCached(copy,pub,cache));
             assertEquals(3,cache.checks);
             a.state.acceptRevocations(AdminRecords.list(REVOCATIONS,f.group,2,f.time.millis(),List.of(),f.admin));
-            a.state.verifyCertificateCached(copy,pub,cache);assertEquals(4,cache.checks);
+            assertThrows(SecurityException.class,()->a.state.verifyCertificateCached(copy,pub,cache));assertEquals(4,cache.checks);
             f.time.advance(30L*24*60*60);
             for(int i=0;i<10;i++)assertThrows(SecurityException.class,()->a.state.verifyCertificateCached(copy,pub,cache));
             assertEquals(4,cache.checks);

@@ -15,10 +15,14 @@ public interface AdminRecordStore {
 
     /** 受けた順の一覧（起点・管理者・失効）と URL 管理者の添えた署名。版も検査し直す。 */
     record Snapshot(List<byte[]> records, byte[] anchorSignature, byte[] revocations,
-                    long administratorVersion, long revocationVersion) {
+                    long administratorVersion, long revocationVersion,byte[] announcement) {
+        public Snapshot(List<byte[]> records,byte[] anchorSignature,byte[] revocations,long administratorVersion,long revocationVersion){
+            this(records,anchorSignature,revocations,administratorVersion,revocationVersion,null);
+        }
         public Snapshot {
             records=copy(records);anchorSignature=anchorSignature.clone();
             revocations=revocations==null ? null : revocations.clone();
+            announcement=announcement==null?null:announcement.clone();
         }
         private static List<byte[]> copy(List<byte[]> values) {
             List<byte[]> result=new ArrayList<>();for(byte[] value:values) result.add(value.clone());return List.copyOf(result);
@@ -26,5 +30,6 @@ public interface AdminRecordStore {
         @Override public List<byte[]> records() { return copy(records); }
         @Override public byte[] anchorSignature() { return anchorSignature.clone(); }
         @Override public byte[] revocations() { return revocations==null ? null : revocations.clone(); }
+        @Override public byte[] announcement(){return announcement==null?null:announcement.clone();}
     }
 }

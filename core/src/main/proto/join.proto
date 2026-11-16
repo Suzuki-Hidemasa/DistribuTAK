@@ -23,6 +23,9 @@ message JoinResponse {
   bytes revocations = 5;
   bytes certificate = 6;
   bytes wrapped_key = 7;
+  // 同版の入り直しでは署名付き告知を必須とする。旧返事の読み込みでは省略を許す。
+  // A signed announcement is required for same-version rejoin; legacy responses may omit it when decoded.
+  bytes key_announcement = 8;
 }
 message JoinPacket {
   uint32 kind = 1; // 求め3、返事4
