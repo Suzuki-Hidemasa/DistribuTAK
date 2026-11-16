@@ -300,7 +300,7 @@ class ManagedKeyVerifierTest {
         for(var order:List.of(List.of(a,b,c),List.of(a,c,b),List.of(b,a,c),
                 List.of(b,c,a),List.of(c,a,b),List.of(c,b,a))){
             var pending=new ManagedPending(clock);
-            for(var r:order)assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+            for(var r:order)assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,r==b?state.administrators().binding(pub(1)).memberId():null));
             var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
             var applied=new ArrayList<ManagedDhtRecord>();
             var checked=pending.retry(verifier,held::get,result->{
@@ -326,7 +326,7 @@ class ManagedKeyVerifierTest {
             public AdminRecords.Record revocations(long version,byte[] digest){return revocations.get(0);}
         });
         var pending=new ManagedPending(clock);
-        for(var r:List.of(c,b,a))assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        for(var r:List.of(c,b,a))assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,r==a?state.administrators().binding(pub(1)).memberId():null));
         var first=new java.util.concurrent.atomic.AtomicBoolean(true);
         var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
         pending.retry(verifier,key->{
@@ -379,7 +379,7 @@ class ManagedKeyVerifierTest {
         var failed=wrap(announce(4,NOW),certificate,NOW,1);
         var last=wrap(announce(3,NOW),certificate,NOW,1);
         var pending=new ManagedPending(moving);
-        for(var r:List.of(last,failed,first))assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        for(var r:List.of(last,failed,first))assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,r==first?state.administrators().binding(pub(1)).memberId():null));
         time.addAndGet(60000);
         var failure=new IllegalArgumentException("application failure");
         var applied=new ArrayList<ManagedDhtRecord>();

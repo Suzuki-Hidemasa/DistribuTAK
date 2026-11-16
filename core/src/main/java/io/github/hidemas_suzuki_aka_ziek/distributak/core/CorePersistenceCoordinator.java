@@ -179,8 +179,8 @@ public final class CorePersistenceCoordinator {
     void requireReceivedData(byte[] wire){
         if(!acceptsPersistingData()){requireData(wire);return;}
         try{
-            if(ManagementPage.decodeEnvelope(wire).kind()!=ManagementPage.Kind.REVOCATION)throw invalid();
-        }catch(IllegalArgumentException bad){throw new IllegalStateException("Revocation pages only during persistence");}
+            ManagementPage.decodeEnvelope(wire);
+        }catch(IllegalArgumentException bad){throw new IllegalStateException("Management pages only during persistence");}
     }
     void forgetManagementPages(byte[] peer){recoveryPages.forget(peer);}
     void requireData(byte[] wire){
@@ -379,6 +379,142 @@ public final class CorePersistenceCoordinator {
                 }
                 var ack=recoveryPages.confirm(peer,session,generation,page);
                 if(ack==null)recoveryPages.reject(peer,session,generation,page);
+                return new ManagementPageAssembler.Result(result.status(),completed,ack);
+            }
+        }catch(RuntimeException invalid){
+            synchronized(sessions){recoveryPages.reject(peer,session,generation,page);}
+            return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.REJECTED,null);
+        }finally{Crypto.wipe(encoded);}
+    }
+    /**
+     * 名簿の検証済み候補。save だけを共有ロックの外で呼び、再検査後に publish する。summary は save を null にする。
+     * <p>
+     * Validated roster candidate. Only save runs outside the shared lock; publish follows rechecking. Summaries use null save.
+     */
+    public record RosterUpdate(Runnable save,java.util.function.BooleanSupplier valid,Runnable publish,java.util.function.BooleanSupplier ready){
+        public RosterUpdate(Runnable save,java.util.function.BooleanSupplier valid,Runnable publish){this(save,valid,publish,()->true);}
+        public RosterUpdate(Runnable save,java.util.function.BooleanSupplier valid,Runnable publish,java.util.function.BooleanSupplier ready){
+            this.save=save;this.valid=Objects.requireNonNull(valid);this.publish=Objects.requireNonNull(publish);this.ready=Objects.requireNonNull(ready);
+        }
+    }
+    /**
+     * 新しい組立を始めず、現在の束縛と既存の名簿完了記録だけから再送ACKを得る。
+     * <p>
+     * Obtains a replay ACK solely from the current binding and existing roster completion records, without starting assembly.
+     */
+    public ManagementPageAssembler.RosterAckRetry completedRosterAck(byte[] peer,byte[] session,long generation,ManagementPage page,long receivedAt){synchronized(sessions){
+        if(!permits(Operation.ROSTER)||isRevoked(peer)||!current(peer,session,generation))return null;
+        return recoveryPages.completedRosterAck(peer,session,generation,page,receivedAt);
+    }}
+    /**
+     * 現在の束縛を検査して、完了記録内の名簿ACK再投入を扱う。
+     * <p>
+     * Checks current bindings while handling roster ACK retries inside completion records.
+     */
+    public boolean deferRosterAck(byte[] peer,byte[] session,long generation,ManagementPageAck ack,long received,long began){synchronized(sessions){
+        return permits(Operation.ROSTER)&&!isRevoked(peer)&&current(peer,session,generation)
+                &&recoveryPages.deferRosterAck(peer,session,generation,ack,received,began);
+    }}
+    /**
+     * 再投入の直前に現在のセッション・世代・失効を再検査する。管理者の権限は呼出側でも検査する。
+     * <p>
+     * Rechecks current sessions, generations and revocation immediately before requeueing. The caller also checks administrator authority.
+     */
+    public List<ManagementPageAssembler.RosterAckRetry> rosterAckRetries(){synchronized(sessions){
+        var result=new ArrayList<ManagementPageAssembler.RosterAckRetry>();
+        for(var retry:recoveryPages.rosterAckRetries()){
+            if(permits(Operation.ROSTER)&&!isRevoked(retry.peer())&&current(retry.peer(),retry.session(),retry.generation()))result.add(retry);
+            else recoveryPages.removeRosterAckRetry(retry);
+        }
+        return List.copyOf(result);
+    }}
+    /**
+     * 処理を終えた名簿ACKの再投入情報を解放する。
+     * <p>
+     * Releases processed roster ACK retry metadata.
+     */
+    public void removeRosterAckRetry(ManagementPageAssembler.RosterAckRetry retry){synchronized(sessions){recoveryPages.removeRosterAckRetry(retry);}}
+    /**
+     * 名簿交換を閉じるときに再投入情報だけを解放する。
+     * <p>
+     * Releases only retry metadata when roster exchange closes.
+     */
+    public void clearRosterAckRetries(){synchronized(sessions){recoveryPages.clearRosterAckRetries();}}
+    /**
+     * 保留summaryの現在の束縛と管理者権限を再検査し、無効な本体を消す。
+     * <p>
+     * Rechecks current bindings and administrator authority for pending summaries, wiping invalid bodies.
+     */
+    public void pruneRosterSummaryRetries(java.util.function.Predicate<byte[]> authorized){synchronized(sessions){
+        recoveryPages.pruneRosterSummaryRetries((peer,session,generation)->permits(Operation.ROSTER)&&!isRevoked(peer)
+                &&current(peer,session,generation)&&authorized.test(peer));
+    }}
+    /**
+     * 名簿交換のcloseで保留summaryの本体を消す。
+     * <p>
+     * Wipes pending summary bodies when roster exchange closes.
+     */
+    public void clearRosterSummaryRetries(){synchronized(sessions){recoveryPages.clearRosterSummaryRetries();}}
+    /**
+     * FIRSTで認証した名簿候補を保存する。保存後の再検査が失敗した候補は公開しない。
+     * <p>
+     * Saves a roster candidate authenticated by FIRST, without publishing a candidate that fails post-save checks.
+     */
+    public boolean saveRoster(RosterUpdate update,Runnable stopped){
+        final long token;
+        synchronized(sessions){require(Operation.ROSTER);if(!update.valid().getAsBoolean())return false;
+            token=++operation;state=State.PERSISTING;}
+        try{Objects.requireNonNull(update.save()).run();}
+        catch(RuntimeException failure){
+            synchronized(sessions){state=State.STORAGE_FAILED;stopReason=StopReason.STORAGE_FAILED;sessions.storageFailed();recoveryPages.clear();}
+            stopped.run();return false;
+        }
+        synchronized(sessions){
+            if(operation!=token||state!=State.PERSISTING)return false;
+            state=State.RUNNING;sessions.refresh();
+            if(sessions.isClosed()||!update.valid().getAsBoolean())return false;
+            update.publish().run();return true;
+        }
+    }
+    /**
+     * 共有の組立枠で名簿とsummaryを受ける。保存の確定・現在の束縛と権限の再検査・公開を終えてから完了ACKを作る。
+     * <p>
+     * Receives rosters and summaries in the shared assembly area. Completion ACKs follow durable storage, current binding and authority checks, and publication.
+     */
+    public ManagementPageAssembler.Result receiveRosterPage(byte[] peer,byte[] session,long generation,ManagementPage page,long receivedAt,
+            java.util.function.BiFunction<byte[],Integer,RosterUpdate> prepare,Runnable stopped){
+        final ManagementPageAssembler.Result result;final RosterUpdate update;final long token;
+        synchronized(sessions){
+            if(!permits(Operation.ROSTER)||isRevoked(peer)||!current(peer,session,generation)
+                    ||(page.kind()!=ManagementPage.Kind.ROSTER&&page.kind()!=ManagementPage.Kind.ROSTER_SUMMARY))
+                return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.REJECTED,null);
+            result=recoveryPages.receiveAt(peer,session,generation,page,receivedAt);
+        }
+        if(result.completed()==null)return result;
+        byte[] encoded=result.completed().data();
+        try(var completed=result.completed()){
+            synchronized(sessions){
+                require(Operation.ROSTER);
+                update=Objects.requireNonNull(prepare.apply(encoded,completed.totalEntries()));
+                if(!update.valid().getAsBoolean())throw invalid();
+                token=++operation;if(update.save()!=null)state=State.PERSISTING;
+            }
+            if(update.save()!=null){
+                try{update.save().run();}
+                catch(RuntimeException failure){
+                    synchronized(sessions){state=State.STORAGE_FAILED;stopReason=StopReason.STORAGE_FAILED;sessions.storageFailed();recoveryPages.clear();}
+                    stopped.run();throw failure;
+                }
+            }
+            synchronized(sessions){
+                if(operation==token&&state==State.PERSISTING){sessions.refresh();state=State.RUNNING;}
+                if(operation!=token||state!=State.RUNNING||isRevoked(peer)||!current(peer,session,generation)||!update.valid().getAsBoolean())throw invalid();
+                if(!update.ready().getAsBoolean()){
+                    recoveryPages.retryRosterSummary(peer,session,generation,page,encoded,receivedAt);
+                    return new ManagementPageAssembler.Result(ManagementPageAssembler.Status.INCOMPLETE,null);
+                }
+                var ack=recoveryPages.confirmAfter(peer,session,generation,page,update.publish());
+                if(ack==null)throw invalid();
                 return new ManagementPageAssembler.Result(result.status(),completed,ack);
             }
         }catch(RuntimeException invalid){

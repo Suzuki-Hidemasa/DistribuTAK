@@ -298,12 +298,14 @@ public final class JoinHandshake {
         public static Joiner rejoin(Invitation invitation,byte[] identitySecret,byte[] newHandshakeSecret,Clock clock,
                 AdminState saved,AdminRecords.Record previousCertificate,long keyVersion,byte[] key,KeyAnnouncement announcement,List<byte[]> subjects){
             Crypto.length(key,32);saved.checkRestoredGroupKey(key,keyVersion);
-            if(announcement!=null)announcement.checkKey(saved.administrators().group(),keyVersion,key);
+            var retained=saved.announcement();
+            if(retained==null&&announcement!=null)throw new SecurityException("Unpersisted announcement cannot initialize rejoin");
+            if(announcement!=null)announcement.checkKey(saved.administrators().group(),keyVersion,key,retained);
             var union=new java.util.TreeSet<byte[]>(AdminRecords::compareBytes);union.addAll(saved.revokedSubjects());
             for(byte[] subject:subjects){Crypto.length(subject,32);union.add(subject.clone());}
             if(union.size()>AdminRecords.MAX_ENTRIES)throw new AdminRecords.RevocationLimitException();
             var result=rejoin(invitation,identitySecret,newHandshakeSecret,clock,saved,previousCertificate,keyVersion);
-            result.savedKey=key.clone();result.savedAnnouncement=saved.announcement()==null?announcement:saved.announcement();
+            result.savedKey=key.clone();result.savedAnnouncement=retained;
             result.savedSubjects=List.copyOf(union);result.checkedRejoin=true;return result;
         }
         public synchronized byte[] request() {
@@ -351,19 +353,21 @@ public final class JoinHandshake {
                 }
                 if(savedGroup!=null) {
                     if(wrapped.version()<savedKeyVersion) throw new SecurityException("入り直しの鍵の版が古すぎます");
-                    if((checkedRejoin||wrapped.version()==savedKeyVersion)&&announcement==null)throw new SecurityException("Rejoin announcement is required");
+                    if(announcement==null)throw new SecurityException("Rejoin announcement is required");
                     for(byte[] subject:savedSubjects)if(!checked.revocations().hasEntry(subject))throw new SecurityException("Rejoin omits accepted revocations");
                     if(wrapped.version()==savedKeyVersion){
                         if(savedKey==null)throw new SecurityException("Retained key is required for equal-version rejoin");
-                        announcement.checkKey(savedGroup,savedKeyVersion,savedKey);
-                        if(savedAnnouncement!=null&&KeyAnnouncement.compare(announcement,savedAnnouncement)<0)throw new SecurityException("Announcement rank regressed");
+                        announcement.checkKey(savedGroup,savedKeyVersion,savedKey,savedAnnouncement);
                     }
                     opened=checked.openRejoinedGroupKey(wrapped,Crypto.blake2s(identity),handshakeSecret,savedKeyVersion);
                 } else opened=checked.openGroupKey(wrapped,Crypto.blake2s(identity),handshakeSecret,-1);
                 byte[] key=opened.copy();
                 try{
                     if(savedGroup!=null&&wrapped.version()==savedKeyVersion&&!Crypto.equal(savedKey,key))throw new SecurityException("Same-version key changed");
-                    if(announcement!=null){announcement.checkKey(response.group,wrapped.version(),key);checked.recordGroupKey(announcement,key,wrapped.version());}
+                    if(announcement!=null){
+                        announcement.checkKey(response.group,wrapped.version(),key,savedAnnouncement);
+                        checked.recordGroupKey(announcement,key,wrapped.version());
+                    }
                 }finally{Crypto.wipe(key);}
                 var joined=new Joined(checked,certificate,opened,wrapped.version());checked=null;opened=null;return joined;
             } finally {

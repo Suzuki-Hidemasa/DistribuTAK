@@ -138,6 +138,16 @@ final class RevocationRecovery implements AutoCloseable {
         return sender.offer(destination,verified.sessionId(),verified.generation(),ManagementPage.Kind.REVOCATION,
                 operations.next(),body.encode(),body.entries().size(),false);
     }
+    byte[] nextManagementOperation(){return operations.next();}
+    ManagementPageSender.Offer offerRoster(byte[] peer,ManagementPage.Kind kind,byte[] operation,byte[] data,int count){
+        if(!coordinator.permits(CorePersistenceCoordinator.Operation.ROSTER))return ManagementPageSender.Offer.BUSY;
+        var verified=sessions.verifiedSession(peer);if(verified==null)return ManagementPageSender.Offer.INVALID;
+        sender.discardOtherSessions(peer,verified.sessionId(),verified.generation());
+        return sender.offer(peer,verified.sessionId(),verified.generation(),kind,operation,data,count,false);
+    }
+    boolean rosterAck(byte[] peer,byte[] session,ManagementPageAck ack){
+        return coordinator.permits(CorePersistenceCoordinator.Operation.ROSTER)&&sender.sendAck(peer,session,ack);
+    }
     private void abandon(){
         coordinator.abandonRecovery();Crypto.wipe(peer);Crypto.wipe(session);peer=null;session=null;request=null;requests=0;lastRequest=Long.MIN_VALUE;
     }
