@@ -142,9 +142,14 @@ public final class ManagementPageAssembler {
             for(var record:retired)record.at=now;
         }lastClock=now;
         completed.removeIf(r->now-r.at>=TOTAL_MILLIS);retired.removeIf(r->now-r.at>=TOTAL_MILLIS);
-        var iterator=assemblies.values().iterator();
+        var iterator=assemblies.entrySet().iterator();
         while(iterator.hasNext()){
-            var assembly=iterator.next();if(assembly.expired(now)){iterator.remove();assembly.lease.close();}
+            var entry=iterator.next();var assembly=entry.getValue();
+            if(assembly.expired(now)){
+                // 期限で捨てた対象の残りから新しい組立を作り、配送完了と誤認するのを防ぐ。
+                // Prevent a fresh assembly from expired target remnants from falsely confirming delivery.
+                remember(retired,entry.getKey(),assembly,now);iterator.remove();assembly.lease.close();
+            }
         }
     }
     public synchronized void forget(byte[] peer){

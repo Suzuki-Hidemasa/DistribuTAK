@@ -144,8 +144,8 @@ public final class ManagementPageSender {
     public void rotating(boolean value){
         rotating=value;
         for(var o:new ArrayList<>(active))if(o.blocked(rotating)){
-            // 受け手の組立が消えていても完成できるよう、投入時刻を保って全ページを送り直す。
-            // Resend every page while preserving the offer time so completion remains possible after receiver assembly expiry.
+            // 受け手に残る組立へ全ページを送り直すため、投入時刻を保って送信の記録を初期化する。
+            // Reset send records while preserving the offer time to resend all pages into the surviving receiver assembly.
             active.remove(o);o.resetForResume();pending.add(o);
         }
     }

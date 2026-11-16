@@ -89,7 +89,8 @@ class ManagementPageAssemblerTest {
     @Test void backwardClockForgetAndClearReleaseOnlyTheirOwnReservations() {
         var all=pages(2048);receive(all.get(0));time.now--;assembler.poll();
         assertEquals(0,assembler.active());assertEquals(0,resources.reservedBytes());
-        receive(all.get(0));
+        var rejected=receive(all.get(0));assertEquals(REJECTED,rejected.status());assertNull(rejected.ack());
+        assembler.forget(peer);assertEquals(INCOMPLETE,receive(all.get(0)).status());
         var external=resources.acquire(new DhtId(ManagementPageTest.bytes(32,99)),100);
         assertNotNull(external);assembler.clear();assembler.clear();
         assertEquals(100,resources.reservedBytes());assertEquals(1,resources.active());

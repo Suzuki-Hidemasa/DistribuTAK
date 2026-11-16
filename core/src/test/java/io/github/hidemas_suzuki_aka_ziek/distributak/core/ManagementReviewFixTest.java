@@ -21,6 +21,88 @@ class ManagementReviewFixTest {
     void offer(ManagementPage.Kind kind,int operation,int bytes){assertEquals(ManagementPageSender.Offer.ACCEPTED,
             sender.offer(peer(1),SESSION,1,kind,op(operation),new byte[bytes],0,false));}
     void ack(ManagementPage page){sender.acknowledge(peer(1),SESSION,1,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{page.pageIndex()}));}
+    void assertRejectedWithoutAck(ManagementPageAssembler.Result result){
+        assertEquals(REJECTED,result.status());assertNull(result.ack());assertNull(result.completed());
+    }
+    @Test void budgetWaitPastReceiverExpiryFailsInsteadOfCompletingOnlyAtTheSender(){
+        offer(ManagementPage.Kind.ROSTER,1,2048);assertTrue(budget.tryTake(peer(1),3));sender.poll();
+        var firstAck=receive(sent.get(0)).ack();assertNotNull(firstAck);read=sent.size();
+        for(int second=1;second<30;second++){
+            clock.now=second*1000;assertTrue(budget.tryTake(peer(1),4));
+            if(second==2)sender.acknowledge(peer(1),SESSION,1,firstAck);
+            sender.poll();assembler.poll();
+        }
+        clock.now=30000;sender.poll();drain(false);
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(1,rejected);
+        clock.now=32000;sender.poll();assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());
+        assertEquals(0,resources.active());
+    }
+    void boundaryWait(long firstAckDelay,long sendAt,long pageDelay,long ackDelay){
+        offer(ManagementPage.Kind.ROSTER,1,8192);sender.poll();
+        var acks=new ArrayList<ManagementPageAck>();
+        while(read<sent.size())acks.add(receive(sent.get(read++)).ack());
+        clock.now=firstAckDelay;for(var ack:acks)sender.acknowledge(peer(1),SESSION,1,ack);
+        for(long at=firstAckDelay+1;at<sendAt-1100;at+=250){
+            clock.now=at;budget.tryTake(peer(1),4);sender.poll();
+        }
+        assertEquals(4,sent.size());clock.now=sendAt;sender.poll();assertEquals(8,sent.size());
+        clock.now=sendAt+pageDelay;
+        while(read<sent.size())assertRejectedWithoutAck(receive(sent.get(read++)));
+        clock.now=sendAt+pageDelay+ackDelay;sender.poll();
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);
+        clock.now=firstAckDelay+30000;sender.poll();
+        assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());assertEquals(0,resources.active());
+    }
+    @Test void boundaryWithDelayedFirstAckRejectsRemainingPages(){boundaryWait(1000,30500,100,100);}
+    @Test void pageInTransitAcrossReceiverDeadlineIsRejected(){boundaryWait(0,29900,200,50);}
+    void delayedAckAfterExpiry(boolean evict){
+        offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();
+        var oldAck=receive(sent.get(0)).ack();assertNotNull(oldAck);read=sent.size();
+        sender.rotating(true);clock.now=31000;assembler.poll();assertEquals(0,assembler.active());
+        if(evict){
+            // 別の相手の8対象を期限切れにし、最初の対象を破棄記録から押し出す。
+            // Expire eight targets from another peer to evict the first target from retirement records.
+            for(int i=0;i<8;i++){
+                var first=pages(10+i,2048).get(0);
+                assertEquals(INCOMPLETE,assembler.receive(peer(2),SESSION,1,first).status());
+                clock.now--;assembler.poll();
+                if(i<7)assertRejectedWithoutAck(receive(sent.get(0)));
+            }
+        }
+        sender.rotating(false);sender.poll();
+        // 再開後の先頭ページを落とし、末尾ページのあとに停止前のACKを届ける。
+        // Drop the resumed first page and deliver the pre-pause ACK after the tail page.
+        read++;drain(false);sender.acknowledge(peer(1),SESSION,1,oldAck);
+    }
+    @Test void delayedPrePauseAckCannotCompleteAnExpiredRoster(){
+        delayedAckAfterExpiry(false);
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(1,rejected);
+        clock.now=61000;sender.poll();assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());
+        assertEquals(0,resources.active());
+    }
+    @Test void evictingEightRetiredTargetsCanAgainCompleteOnlyAtTheSender(){
+        delayedAckAfterExpiry(true);
+        assertEquals(1,sender.completed());assertEquals(0,receiverCompleted);assertEquals(0,sender.failed());
+        assertEquals(1,assembler.active());assertEquals(2048,resources.reservedBytes());
+    }
+    @Test void expiredTargetIsRejectedUntilRetentionEndsButNewOperationCanComplete(){
+        var old=pages(1,2048);receive(old.get(0));clock.now=30000;assembler.poll();
+        assertEquals(0,resources.reservedBytes());
+        for(var page:old)assertRejectedWithoutAck(receive(page));
+        var next=pages(2,2048);assertEquals(INCOMPLETE,receive(next.get(0)).status());
+        assertEquals(COMPLETE,receive(next.get(1)).status());
+        clock.now=269999;assertRejectedWithoutAck(receive(old.get(1)));
+        clock.now=270000;assertEquals(INCOMPLETE,receive(old.get(1)).status());
+        assertEquals(COMPLETE,receive(old.get(0)).status());assertEquals(0,resources.active());
+    }
+    @Test void rollbackRetiresTheAssemblyAndKeepsItRejectedForTwoHundredFortySeconds(){
+        clock.now=1000;var old=pages(1,2048);receive(old.get(0));clock.now=999;assembler.poll();
+        assertEquals(0,resources.reservedBytes());
+        for(var page:old)assertRejectedWithoutAck(receive(page));
+        assertEquals(COMPLETE,receive(pages(2,1).get(0)).status());
+        clock.now=240998;assertRejectedWithoutAck(receive(old.get(1)));
+        clock.now=240999;assertEquals(INCOMPLETE,receive(old.get(1)).status());
+    }
     @Test void aLostFinalAckDoesNotReserveAgainAndTheNextObjectCompletes(){
         var all=pages(1,4096);for(var p:all)receive(p);
         var retry=receive(all.get(3));assertEquals(DUPLICATE,retry.status());assertNull(retry.completed());
@@ -64,14 +146,14 @@ class ManagementReviewFixTest {
             if(result.ack()!=null)sender.acknowledge(peer(1),SESSION,1,result.ack());
         }
     }
-    @Test void resumedRosterCompletesAtBothEndsAfterTheReceiverAssemblyExpires(){
+    @Test void resumedRosterFailsAfterTheReceiverAssemblyExpires(){
         offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();drain(true);
         sender.rotating(true);ack(sent.get(1));assertEquals(0,sender.completed());
         clock.now=31000;assembler.poll();assertEquals(0,assembler.active());
         sender.rotating(false);sender.poll();drain(false);
-        assertEquals(1,sender.completed());
-        assertEquals(1,receiverCompleted,"sender completed="+sender.completed()+", receiver completed="+receiverCompleted);
-        assertEquals(1,rostersCompleted);assertEquals(0,sender.failed());assertEquals(0,assembler.active());
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(0,rostersCompleted);
+        assertEquals(2,rejected);clock.now=61000;sender.poll();
+        assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());assertEquals(0,assembler.active());
     }
     @Test void matchingDuplicateKeepsAssemblyAliveUntilTheNextNewPage(){
         var all=pages(1,3072);assertEquals(INCOMPLETE,receive(all.get(0)).status());
@@ -90,7 +172,7 @@ class ManagementReviewFixTest {
         clock.now=239999;assertEquals(DUPLICATE,receive(all.get(0)).status());
         assertEquals(1,assembler.active());clock.now=240000;assembler.poll();
         assertEquals(0,assembler.active());assertEquals(0,resources.reservedBytes());
-        assertEquals(INCOMPLETE,receive(all.get(1)).status());
+        assertRejectedWithoutAck(receive(all.get(1)));
     }
     @Test void resumedRosterCompletesAtBothEndsAfterOverThirtySecondsOfDuplicates(){
         offer(ManagementPage.Kind.ROSTER,1,65536);
@@ -147,8 +229,8 @@ class ManagementReviewFixTest {
     @Test void resumedRosterGetsAFreshRetryBudgetButKeepsItsOriginalTotalDeadline(){
         offer(ManagementPage.Kind.ROSTER,1,2048);
         for(int i=0;i<=3;i++){clock.now=i*1000;sender.poll();drain(true);}
-        sender.rotating(true);clock.now=34000;assembler.poll();sender.rotating(false);sender.poll();drain(true);
-        clock.now=35000;sender.poll();drain(false);
+        sender.rotating(true);clock.now=4000;assembler.poll();sender.rotating(false);sender.poll();drain(true);
+        clock.now=5000;sender.poll();drain(false);
         assertEquals(1,sender.completed());assertEquals(1,receiverCompleted);assertEquals(0,sender.failed());
         offer(ManagementPage.Kind.ROSTER,3,2048);sender.poll();sender.rotating(true);
         clock.now=275000;sender.rotating(false);sender.poll();
