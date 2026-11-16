@@ -39,6 +39,25 @@ class ManagementPageSenderTest {
     final ManagementSendBudget budget=new ManagementSendBudget(clock);
     final List<Frame> frames=new ArrayList<>();
     final ManagementPageSender sender=new ManagementPageSender(GROUP,clock,budget,(p,s,d)->{frames.add(new Frame(clock.now,p,d));return true;});
+    @Test void replacingSessionReleasesOldPendingAndActiveWithoutForgettingOtherPeers(){
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,offer(1,1,ManagementPage.Kind.REVOCATION,10,1,false));sender.poll();
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,offer(1,2,ManagementPage.Kind.ANNOUNCEMENT,20,1,false));
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,offer(2,3,ManagementPage.Kind.REVOCATION,30,1,false));
+        sender.discardOtherSessions(peer(1),op(4),8);
+        assertEquals(30,sender.heldBytes());assertEquals(2,sender.failed());
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,sender.offer(peer(1),op(4),8,ManagementPage.Kind.REVOCATION,op(5),new byte[40],1,false));
+    }
+    @Test void sameSessionAndGenerationRetainPeerBusyAndOriginalDeadline(){
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,offer(1,1,ManagementPage.Kind.REVOCATION,10,1,false));
+        clock.now=239999;sender.discardOtherSessions(peer(1),SESSION,7);
+        assertEquals(ManagementPageSender.Offer.PEER_BUSY,offer(1,2,ManagementPage.Kind.REVOCATION,10,1,false));
+        assertEquals(10,sender.heldBytes());clock.now=240000;sender.poll();assertEquals(0,sender.heldBytes());assertEquals(1,sender.failed());
+    }
+    @Test void replacingGenerationDropsOldTransmissionEvenWithSameSessionBytes(){
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,offer(1,1,ManagementPage.Kind.REVOCATION,10,1,false));
+        sender.discardOtherSessions(peer(1),SESSION,8);assertEquals(0,sender.heldBytes());
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,sender.offer(peer(1),SESSION,8,ManagementPage.Kind.REVOCATION,op(2),new byte[10],1,false));
+    }
     ManagementPageSender.Offer offer(int peer,int operation,ManagementPage.Kind kind,int bytes,int entries,boolean notice){
         return sender.offer(peer(peer),SESSION,7,kind,op(operation),new byte[bytes],entries,notice);
     }

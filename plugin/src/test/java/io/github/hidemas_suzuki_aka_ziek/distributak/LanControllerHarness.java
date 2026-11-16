@@ -75,8 +75,14 @@ final class LanControllerHarness implements AutoCloseable {
         };}
         GroupStateStorage groupStorage(){state.fail=failSave;return new GroupStateStorage(envelope,state,source(state),settings,settings,v->{});}
         Clock loadClock;RuntimeException loadFailure;
-        public LanGroup load(Clock clock)throws Exception {if(loadFailure!=null)throw loadFailure;return erased?null:groupStorage().load(loadClock==null?clock:loadClock);}
-        public void save(LanGroup group)throws Exception {groupStorage().save(group);}
+        VersionSixStorageTest.Files managementFiles;
+        StopMarkerTest.Disk stopMarker;
+        void enableSix(){managementFiles=new VersionSixStorageTest.Files();stopMarker=new StopMarkerTest.Disk();}
+        GroupStateStorage managedStorage(){return managementFiles==null?groupStorage():new GroupStateStorage(envelope,state,source(state),settings,settings,v->{},managementFiles,stopMarker.marker());}
+        public void prepareNetwork(LanGroup group)throws Exception{managedStorage().prepareNetwork(group);}
+        public CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){return managedStorage().persistenceHooks(group);}
+        public LanGroup load(Clock clock)throws Exception {if(loadFailure!=null)throw loadFailure;return erased?null:managedStorage().load(loadClock==null?clock:loadClock);}
+        public void save(LanGroup group)throws Exception {managedStorage().save(group);}
         public boolean largeState(){return state.value!=null&&state.value.length>512*1024;}
         boolean failLocalRenewal,failIssuedRenewal;
         public boolean saveLocalRenewal(LanGroup group,AdminRecords.Record certificate)throws Exception{if(failLocalRenewal)throw new java.io.IOException("test save failure");return groupStorage().saveLocalRenewal(group,certificate);}

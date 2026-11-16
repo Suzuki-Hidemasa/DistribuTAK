@@ -56,6 +56,7 @@ final class VersionSixStorage {
             var target=new StopMarker.Target(seq,received.version(),new byte[32],CorePersistenceCoordinator.revocationDigest(management.union),previous==null?StopMarker.RECEIVED:StopMarker.RECOVERY);
             management=management.checkpoint(new ManagementState.Checkpoint(number,generation,snapshot.records().size(),snapshot.administratorVersion(),snapshot.revocationVersion(),
                     snapshot.revocations(),received.encode(),target,previous,previous==null?null:request.requirement().subjects()));
+            if(previous!=null&&previous.candidateLess())management=management.checkpoint(management.checkpoint.basis(group.state.snapshot()));
             byte[] canonicalState=encode(group,management,seq,new byte[32],key,keyVersion),canonicalManagement=management.encode(true);
             byte[] digest;
             try{digest=candidateDigest(canonicalState,canonicalManagement);}finally{Crypto.wipe(canonicalState);Crypto.wipe(canonicalManagement);}
@@ -102,7 +103,7 @@ final class VersionSixStorage {
         try(var candidate=prepare(group,group.state.snapshot(),null,null,group.keyVersion,null,null)){initialize(candidate.management.checkpoint.target);}
     }
     synchronized Candidate stage(LanGroup group)throws Exception{
-        if(pending!=null)throw new IllegalStateException("失効の保存中です");
+        if(pending!=null||group.storageBlocked)throw new IllegalStateException("失効の保存中です");
         var candidate=prepare(group,group.state.snapshot(),null,null,group.keyVersion,null,null);
         try{
             checkSpace(candidate);
@@ -136,6 +137,9 @@ final class VersionSixStorage {
     private static void block(LanGroup group,StopMarker.Target target){
         group.storageBlocked=true;
         List<byte[]> subjects=group.state.revokedSubjects();
+        if(target.candidateLess()){
+            group.recoveryRequirement=CorePersistenceCoordinator.RecoveryRequirement.candidateLess(target.requiredVersion(),subjects);return;
+        }
         if(!Crypto.equal(CorePersistenceCoordinator.revocationDigest(subjects),target.revocationDigest()))subjects=null;
         group.recoveryRequirement=new CorePersistenceCoordinator.RecoveryRequirement(target.requiredVersion(),target.revocationDigest(),subjects);
     }
@@ -146,7 +150,7 @@ final class VersionSixStorage {
             if(!cp.target.matches(current.target()))group.storageBlocked=true;
             return;
         }
-        boolean exact=cp.target.matches(current.target());boolean recovery=cp.previous!=null&&cp.previous.matches(current.target());
+        boolean exact=cp.target.matches(current.target());boolean recovery=cp.previous!=null&&cp.previous.sameRequirement(current.target());
         if((exact||recovery)&&group.saveSeq==cp.target.saveSeq()&&group.managementGeneration==cp.generation){
             byte[] state=encode(group,group.management,group.saveSeq,new byte[32],null,group.keyVersion),management=group.management.encode(true);
             boolean matches;
@@ -160,6 +164,9 @@ final class VersionSixStorage {
             public void active(CorePersistenceCoordinator.PersistenceRequest request){run(()->{
                 synchronized(VersionSixStorage.this){
                     if(pending!=null)throw new IllegalStateException("失効の保存中です");
+                    var existing=marker.inspect();
+                    if(!request.recovery()&&(group.storageBlocked||existing.status()==StopMarker.Status.ACTIVE))
+                        throw new IOException("停止の要件を保持します");
                     // 旧形式では領域だけを確保し、管理保存より先に新候補の active を書く。
                     // For legacy state, allocate only the region and write the new candidate's active marker before management persistence.
                     if(group.management==null&&!request.recovery())prepareNetwork(group);
@@ -204,7 +211,7 @@ final class VersionSixStorage {
             }
             private void saveSnapshot(AdminRecordStore.Snapshot snapshot,byte[] key,long version,Map<String,long[]> numbers,List<byte[]> outgoing){
                 run(()->{synchronized(VersionSixStorage.this){
-                    if(pending!=null)throw new IllegalStateException("失効の保存中です");
+                    if(pending!=null||group.storageBlocked)throw new IllegalStateException("失効の保存中です");
                     try(var candidate=prepare(group,snapshot,null,key,version,numbers,outgoing)){commit(group,candidate,target);settings.run();cleanup(group);}
                 }});
             }

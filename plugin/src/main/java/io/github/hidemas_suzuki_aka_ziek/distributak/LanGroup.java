@@ -283,7 +283,13 @@ final class LanGroup implements AutoCloseable {
                             // Version 6 also keeps expired pending renewals for digest verification (they grant no communication permission).
                             group.rememberRenewal(id,encoded,version==6||encoded[0]==0);
                         }
-                    }catch(RuntimeException e){if(encoded.length>0&&encoded[0]!=10)throw e;group.pendingRenewalFailure=UdpEndpoint.CloseReason.INTERNAL_FAILURE;group.removeRenewal(id);}
+                    }catch(RuntimeException e){
+                        if(encoded.length>0&&encoded[0]!=10)throw e;
+                        group.pendingRenewalFailure=UdpEndpoint.CloseReason.INTERNAL_FAILURE;
+                        // 版6は停止印の照合まで元の符号化を保つ。通信の準備前に改めて整理する。
+                        // Version six preserves original bytes until marker validation and cleans them before communication preparation.
+                        if(version==6)group.restoreRenewal(id,encoded.clone());else group.removeRenewal(id);
+                    }
                     finally{Crypto.wipe(encoded);}
                 }
             }
@@ -298,6 +304,10 @@ final class LanGroup implements AutoCloseable {
         }catch(IOException|RuntimeException e){group.close();throw e;}
     }
     private boolean revokedPeer(){return peerCertificate!=null&&state.revocations()!=null&&state.revokedSubjects().stream().anyMatch(id->Crypto.equal(id,Crypto.blake2s(peerCertificate.field(0))));}
+    void cleanPendingRenewals(){
+        for(var entry:new ArrayList<>(pendingRenewals.entrySet()))try{verifyRenewal(Hex.decode(entry.getKey()),entry.getValue(),true);}
+        catch(RuntimeException invalid){pendingRenewalFailure=UdpEndpoint.CloseReason.INTERNAL_FAILURE;Crypto.wipe(pendingRenewals.remove(entry.getKey()));}
+    }
     boolean forgetRevokedPeer(){
         if(!revokedPeer())return false;
         Crypto.wipe(removeRenewal(Crypto.blake2s(peerCertificate.field(0))));
