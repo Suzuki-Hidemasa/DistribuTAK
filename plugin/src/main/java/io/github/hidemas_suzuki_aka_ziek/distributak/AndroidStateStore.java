@@ -48,7 +48,11 @@ final class AndroidStateStore implements LanRuntime.Storage {
                     try{var descriptor=android.system.Os.open(directory.getPath(),android.system.OsConstants.O_RDONLY,0);
                         try{android.system.Os.fsync(descriptor);}finally{android.system.Os.close(descriptor);}
                     }catch(android.system.ErrnoException e){throw new IOException("管理保存先を同期できません",e);}
-                }),new StopMarker(new StopMarker.FileRegion(new File(directory,"stop-marker.bin")),Thread::sleep));
+                }),new StopMarker(new StopMarker.FileRegion(new File(directory,"stop-marker.bin"),()->{
+                    try{var descriptor=android.system.Os.open(directory.getPath(),android.system.OsConstants.O_RDONLY,0);
+                        try{android.system.Os.fsync(descriptor);}finally{android.system.Os.close(descriptor);}
+                    }catch(android.system.ErrnoException e){throw new IOException("停止印の保存先を同期できません",e);}
+                }),Thread::sleep));
         boolean valid=false,usableState=exists(state)&&!erased;
         if(exists(settings)) {
             try {

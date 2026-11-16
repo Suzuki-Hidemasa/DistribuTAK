@@ -80,9 +80,21 @@ public final class CorePersistenceCoordinator {
     public static final class RecoveryRequirement {
         private final long version;private final byte[] digest;private final List<byte[]> subjects;
         public RecoveryRequirement(long version,byte[] digest,List<byte[]> subjects){
+            this(version,digest,subjects,false);
+        }
+        private RecoveryRequirement(long version,byte[] digest,List<byte[]> subjects,boolean candidateLess){
             Crypto.length(digest,32);this.version=version;this.digest=digest.clone();
             this.subjects=subjects==null?null:canonical(subjects);
-            if(this.subjects!=null&&!Crypto.equal(digest,revocationDigest(this.subjects)))throw invalid();
+            if(candidateLess?(this.subjects==null||!Crypto.equal(digest,new byte[32])):
+                    this.subjects!=null&&!Crypto.equal(digest,revocationDigest(this.subjects)))throw invalid();
+        }
+        /**
+         * 候補なしの印は集合 digest ではない。起動側で署名を検証した保存済み R を使う。
+         * <p>
+         * A candidate-less marker is not a set digest. Uses saved R whose signatures startup has verified.
+         */
+        public static RecoveryRequirement candidateLess(long version,List<byte[]> subjects){
+            return new RecoveryRequirement(version,new byte[32],Objects.requireNonNull(subjects),true);
         }
         boolean covers(AdminRecords.Record candidate){
             if(Long.compareUnsigned(candidate.version(),version)<0)return false;
@@ -313,6 +325,14 @@ public final class CorePersistenceCoordinator {
     private boolean current(byte[] peer,byte[] session,long generation){
         var verified=sessions.verifiedSession(peer);return verified!=null&&verified.generation()==generation&&Arrays.equals(session,verified.sessionId());
     }
+    /**
+     * 相手の切替時に組立と結び付けだけを捨て、復旧全体の期限と停止要件を保つ。
+     * <p>
+     * Discards assemblies and peer binding during peer switches, preserving the total deadline and stop requirements.
+     */
+    public void abandonRecovery(){synchronized(sessions){
+        recoveryPages.clear();recoveryPeer=null;recoverySession=null;recoveryOperation=null;
+    }}
     public ManagementPageAssembler.Result receiveRecoveryPage(byte[] peer,byte[] session,long generation,ManagementPage page,PersistenceHooks hooks){
         final ManagementPageAssembler.Result result;
         synchronized(sessions){

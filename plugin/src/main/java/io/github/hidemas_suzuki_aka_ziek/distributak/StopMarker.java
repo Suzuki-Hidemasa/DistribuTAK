@@ -31,7 +31,9 @@ final class StopMarker {
         }
         @Override public byte[] stateDigest(){return stateDigest.clone();}
         @Override public byte[] revocationDigest(){return revocationDigest.clone();}
-        boolean matches(Target other){return other!=null&&saveSeq==other.saveSeq&&requiredVersion==other.requiredVersion
+        boolean candidateLess(){return Arrays.equals(stateDigest,new byte[32])&&Arrays.equals(revocationDigest,new byte[32]);}
+        boolean matches(Target other){return !candidateLess()&&sameRequirement(other);}
+        boolean sameRequirement(Target other){return other!=null&&saveSeq==other.saveSeq&&requiredVersion==other.requiredVersion
                 &&reason==other.reason&&Arrays.equals(stateDigest,other.stateDigest)&&Arrays.equals(revocationDigest,other.revocationDigest);}
         @Override public String toString(){return "Stop marker target";}
     }
@@ -103,7 +105,7 @@ final class StopMarker {
         if(a==null||b==null||a.sequence==b.sequence)return invalid();
         Slot latest=a.sequence>b.sequence?a:b,older=latest==a?b:a;
         if(latest.sequence-older.sequence!=1)return invalid();
-        if(a.target.matches(b.target))return new Inspection(a.active||b.active?Status.ACTIVE:Status.CLEAR,latest.target,latest.sequence);
+        if(a.target.sameRequirement(b.target))return new Inspection(a.active||b.active?Status.ACTIVE:Status.CLEAR,latest.target,latest.sequence);
         if(latest.active)return new Inspection(Status.ACTIVE,latest.target,latest.sequence);
         return invalid();
     }
@@ -129,8 +131,10 @@ final class StopMarker {
      * Uses the same region of the same file. Allocation writes all 256 bytes without temporary files or rename.
      */
     static final class FileRegion implements Region {
+        interface DirectorySync {void sync()throws IOException;}
         private final File file;
-        FileRegion(File file){this.file=java.util.Objects.requireNonNull(file);}
+        private final DirectorySync directorySync;
+        FileRegion(File file,DirectorySync directorySync){this.file=java.util.Objects.requireNonNull(file);this.directorySync=java.util.Objects.requireNonNull(directorySync);}
         public byte[] read()throws IOException{
             if(!file.exists())return null;
             try(var input=new RandomAccessFile(file,"r")){
@@ -141,6 +145,7 @@ final class StopMarker {
             try(var output=new RandomAccessFile(file,"rw")){
                 output.setLength(BYTES);output.seek(0);output.write(new byte[BYTES]);output.getFD().sync();
             }
+            directorySync.sync();
         }
         public void write(int offset,byte[] bytes)throws IOException{
             if(offset!=0&&offset!=SLOT_BYTES||bytes.length!=SLOT_BYTES)throw new IOException("Invalid stop marker slot");

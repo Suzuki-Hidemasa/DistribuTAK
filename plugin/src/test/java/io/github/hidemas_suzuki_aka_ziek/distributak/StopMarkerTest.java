@@ -125,7 +125,9 @@ public class StopMarkerTest {
     @Test public void realFileIsPreallocatedAndUpdatedWithoutReplacement()throws Exception{
         var path=Files.createTempFile("dtak-marker-test-",".bin");
         try{
-            var m=new StopMarker(new StopMarker.FileRegion(path.toFile()),millis->{});m.initialize(target(1));
+            var m=new StopMarker(new StopMarker.FileRegion(path.toFile(),()->{
+                try(var channel=java.nio.channels.FileChannel.open(path.getParent(),java.nio.file.StandardOpenOption.READ)){channel.force(true);}
+            }),millis->{});m.initialize(target(1));
             Object before=Files.readAttributes(path,java.nio.file.attribute.BasicFileAttributes.class).fileKey();
             m.active(target(2));m.clear(target(2));
             assertEquals(256,Files.size(path));assertEquals(before,Files.readAttributes(path,java.nio.file.attribute.BasicFileAttributes.class).fileKey());

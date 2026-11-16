@@ -92,6 +92,7 @@ final class LanController implements AutoCloseable {
 
     private boolean ownRenewalChecked,renewalAttempted;
     private boolean certificateExpired,keyMissed,revokedPeerForgotten;
+    private boolean storageStopped;
     private String storageWarning="";
     private long publicExpiry;private int publicRenewals;
     private static final String JOIN_FAILED="加入できませんでした。管理者側の状態も確認してください。管理者が招待を出せる場合は、新しい招待でやり直してください";
@@ -115,7 +116,7 @@ final class LanController implements AutoCloseable {
                 else {ready=false;message=e.reason==UdpEndpoint.CloseReason.CLOCK_FAILURE?CLOCK:INTERNAL;}
                 return;
             }catch(SecurityException e){ready=false;message=INTERNAL;return;}
-            if(group!=null)loadSync();
+            if(group!=null&&!group.storageBlocked)loadSync();
             wifi=runtime.network.open(()->enqueue(this::networkChanged));var initial=wifi.snapshot();observed=initial.link;observedRevision=initial.revision;ready=true;savedMember=group!=null;
             message=group==null?(store.erased()?"消去済み。グループを作るか、新しい招待を読んでください":"未所属"):"保存した所属を復元しました";
             log(group==null?"LAN_READY":"LAN_RESTORED");
@@ -169,6 +170,7 @@ final class LanController implements AutoCloseable {
         finally{busy=false;publish();}
     },discarded);}
     private void fail(String fixed) {
+        if(storageStopped||group!=null&&group.storageBlocked)fixed="保存がいっぱい";
         reconnect.stop();
         generation.incrementAndGet();try{stopNetwork();}catch(Exception ignored){}if(group!=null){group.close();group=null;}
         ready=false;joining=false;message=fixed;main.accept(()->{if(!stopped)ui.hideSensitive();});log("LAN_STOPPED");publish(true);
@@ -177,12 +179,17 @@ final class LanController implements AutoCloseable {
     private LanRuntime.Link requireWifi()throws Unavailable {
         LanRuntime.Link selected=selection();if(selected==null)throw new Unavailable("Wi-FiのIPv4がありません。接続してから押してください");return selected;
     }
-    private void requireReady()throws Unavailable {if(!ready||joining||mainFailed.get())throw new Unavailable("今は操作できません");}
+    private void requireReady()throws Unavailable {
+        if(storageStopped||group!=null&&group.storageBlocked||persistence!=null&&!persistence.statusText().isEmpty())throw new Unavailable("保存がいっぱい");
+        if(!ready||joining||mainFailed.get()||persistence!=null&&persistence.state()!=CorePersistenceCoordinator.State.RUNNING)throw new Unavailable("今は操作できません");
+    }
     private void requireGroup()throws Exception {
         if(group==null&&savedMember)group=store.load(clock);
+        if(group!=null&&group.storageBlocked)throw new Unavailable("保存がいっぱい");
     }
     private void rememberPublicGroup() {
         if(group==null)return;administrator=group.isAdministrator();savedMember=true;savedAdmin=group.isAdministrator()&&group.peerCertificate==null;
+        storageStopped|=group.storageBlocked;
         publicGroup="\nグループ: "+LanSupport.shortId(group.groupId)+" 自分: "+LanSupport.shortId(group.id())
                 +"\n相手: "+(group.peerCertificate==null?"未登録":LanSupport.shortId(Crypto.blake2s(group.peerCertificate.field(0))));
         publicExpiry=group.certificate.expiresAt();publicRenewals=group.renewalCount;
@@ -216,6 +223,10 @@ final class LanController implements AutoCloseable {
                     byte[] current=endpoint.sessionId(packet.peer);
                     try{if(current==null||!Crypto.equal(current,packet.session))continue;}
                     finally{Crypto.wipe(current);}
+                    if(recovery!=null&&recovery.receive(packet.peer,packet.session,packet.wire)){
+                        finishRecovery();continue;
+                    }
+                    if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.COT_RECEIVE))continue;
                     if(LanSupport.isTestData(packet.wire)){rx++;log(LanSupport.receipt(rx,packet.peer));}
                     else if(DhtWire.isDht(packet.wire)){if(dht==null||!dht.receive(packet.peer,packet.session,packet.wire))reject++;}
                     else if(AdminControl.isEnvelope(packet.wire)){}
@@ -239,6 +250,9 @@ final class LanController implements AutoCloseable {
         if(epoch!=generation.get())return;
         if(joiningOperation!=null){failedJoin();log("LAN_ENDPOINT_CLOSED reason="+reason.name());publish();return;}
         if(reason==UdpEndpoint.CloseReason.CLOSED_BY_CALLER)return;
+        if(recoveringNetwork||group!=null&&group.storageBlocked){
+            storageStopped=true;reconnect.stop();stopNetwork();message="保存がいっぱい";publish();return;
+        }
         boolean expiredAdministrator=reason==UdpEndpoint.CloseReason.LOCAL_CERTIFICATE_EXPIRED&&group!=null&&group.isAdministrator();
         stopNetwork();if(!expiredAdministrator)releaseGroup();joining=false;
         if(expiredAdministrator){openExpiredAdministrator();}
@@ -260,6 +274,9 @@ final class LanController implements AutoCloseable {
         catch(Exception e){reconnect.stop();releaseGroup();if(ready)message=RENEW_FAILED;}
     }
     private CorePersistenceCoordinator persistence;
+    private RevocationRecovery recovery;
+    private SessionManager managedSessions;
+    private boolean recoveringNetwork;
     private interface SavedAction<T>{T run()throws Exception;}
     private <T> T saving(SavedAction<T> action)throws Exception{
         if(persistence==null)return action.run();
@@ -269,31 +286,50 @@ final class LanController implements AutoCloseable {
         @SuppressWarnings("unchecked") T value=(T)result[0];return value;
     }
     private void openMember()throws Exception {
-        if(group.storageBlocked||group.recoveryRequirement!=null)throw new Unavailable("保存がいっぱい");
-        store.prepareNetwork(group);
+        boolean limited=group.recoveryRequirement!=null;
+        if(group.storageBlocked&&!limited)throw new Unavailable("保存がいっぱい");
+        if(!limited)store.prepareNetwork(group);
         stopNetwork();
-        if(group.isAdministrator()){
+        recoveringNetwork=limited;
+        if(group.isAdministrator()&&!limited){
             var renewed=group.state.renewOwnCertificate(group.certificate,group.handshakeSecret,group.identitySecret,group.administratorSecret);
             if(renewed!=null)try{saving(()->store.saveLocalRenewal(group,renewed));}
             catch(RuntimeException e){throw e;}catch(Exception e){throw new RenewalSaveFailure();}
         }
         LanRuntime.Link selected=requireWifi();long epoch=generation.incrementAndGet();
-        startSync();
+        if(!limited)startSync();
         UdpEndpoint.DatagramIo socket;
         try{socket=selected.open(store.port());}catch(Exception e){stopNetwork();throw new Unavailable("待ち受けを開けません。ポートを確かめてください");}
         SessionManager sessions=null;
         try {
             sessions=group.sessions(clock,runtime.nanos);
             persistence=new CorePersistenceCoordinator(group.state,sessions,new RevocationUnion(group.groupId,new AdminStateTrust(group.state)),
-                    clock,new MonotonicClock(runtime.nanos));
+                    clock,new MonotonicClock(runtime.nanos),group.recoveryRequirement);
             UdpEndpoint next=new UdpEndpoint(sessions,group.state,socket,receiver(epoch),
                     UdpEndpoint.DEFAULT_INTERVAL,runtime.nanos,reason->closed(epoch,reason));
             SessionManager managed=sessions;sessions=null;
             opened(next,selected);
-            startDht(next,managed,selected,epoch);
+            managedSessions=managed;
+            recovery=new RevocationRecovery(group,managed,persistence,new MonotonicClock(runtime.nanos),random,new RevocationRecovery.Transport(){
+                public boolean send(byte[] peer,byte[] session,byte[] wire){return next.sendIfSession(peer,session,wire);}
+                public void start(byte[] peer){next.start(peer);}
+                public void rejected(ManagementPageSender.Offer result){reject++;}
+            },limited?store.persistenceHooks(group):null);
+            if(!limited)startDht(next,managed,selected,epoch);
+            else message="保存がいっぱい";
             if(group.peerCertificate!=null){next.expectPeerCertificate(group.peerCertificate);next.setPeerAddress(Crypto.blake2s(group.peerCertificate.field(0)),group.peerAddress);}
             else if(group.pendingHandshake!=null)next.pinPeerAddress(group.pendingHandshake,group.pendingAddress);
         }catch(Exception e){socket.close();if(sessions!=null)sessions.close();stopNetwork();throw e;}
+    }
+    private void finishRecovery()throws RuntimeException {
+        if(!recoveringNetwork||persistence==null||persistence.state()!=CorePersistenceCoordinator.State.RUNNING)return;
+        if(group.storageBlocked||group.recoveryRequirement!=null||group.localCertificateReason()!=UdpEndpoint.CloseReason.RUNNING){
+            storageStopped=true;message="保存がいっぱい";stopNetwork();return;
+        }
+        try{
+            recoveringNetwork=false;storageStopped=false;inbox.clear();startSync();
+            startDht(endpoint,managedSessions,bound,generation.get());message="保存した所属を復元しました";
+        }catch(Exception failure){message="保存がいっぱい";stopNetwork();}
     }
     private SyncState loadSync()throws Exception {
         try{SyncState state=store.loadSync(group);loadedExternal=store.loadExternal(group);
@@ -555,7 +591,7 @@ final class LanController implements AutoCloseable {
         finally{stopNetwork();if(group!=null){group.close();group=null;}}
         if(wifi==null)wifi=runtime.network.open(()->enqueue(this::networkChanged));
         savedMember=false;savedAdmin=false;administrator=false;publicGroup="";certificateExpired=keyMissed=revokedPeerForgotten=false;storageWarning="";syncUidLimitReached=false;externalLimitReached=false;loadedExternal=null;
-        ready=selfCheckPassed;joining=false;tx=rx=reject=0;message="消去しました。グループを作るか、新しい招待を読んでください";
+        ready=selfCheckPassed;storageStopped=false;joining=false;tx=rx=reject=0;message="消去しました。グループを作るか、新しい招待を読んでください";
         main.accept(()->{if(!stopped)ui.hideSensitive();});log("LAN_ERASED");
     }
     private void networkChanged(){
@@ -603,6 +639,19 @@ final class LanController implements AutoCloseable {
             log("LAN_JOINED elapsedMs="+(runtime.millis()-joinBegan));
         }
         if(endpoint!=null&&group!=null&&!joining) {
+            if(recovery!=null){
+                var candidates=new ArrayList<byte[]>();
+                if(group.peerCertificate!=null)candidates.add(Crypto.blake2s(group.peerCertificate.field(0)));
+                for(var known:endpoint.knownPeers()){
+                    byte[] id=Crypto.blake2s(known.certificate().field(0));
+                    if(candidates.stream().noneMatch(value->Arrays.equals(value,id)))candidates.add(id);
+                }
+                recovery.poll(candidates);finishRecovery();
+                if(endpoint==null)return;
+            }
+            if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.CATCH_UP)){
+                message="保存がいっぱい";publish();return;
+            }
             var peers=endpoint.knownPeers();
             if(sync!=null)for(var peer:peers){
                 byte[] id=Crypto.blake2s(peer.certificate().field(0)),session=endpoint.sessionId(id);
@@ -818,6 +867,8 @@ final class LanController implements AutoCloseable {
         main.accept(()->{if(!stopped)ui.hideSensitive();});
     }
     private void stopNetwork(){
+        if(recovery!=null){recovery.close();recovery=null;}
+        managedSessions=null;recoveringNetwork=false;
         persistence=null;joining=false;proofRequests.close();
         for(var entry:memberFirst.values())Crypto.wipe(entry.session);memberFirst.clear();
         for(byte[] session:deliverySessions.values())Crypto.wipe(session);deliverySessions.clear();
@@ -840,6 +891,7 @@ final class LanController implements AutoCloseable {
         if(stopped||(mainFailed.get()&&(!failure||mainFailurePublished)))return;
         if(mainFailed.get())mainFailurePublished=true;
         rememberPublicGroup();boolean hasWifi=selection()!=null,member=savedMember;
+        if(storageStopped||group!=null&&group.storageBlocked||persistence!=null&&!persistence.statusText().isEmpty())message="保存がいっぱい";
         String text="DistribuTAK "+BuildConfig.VERSION_NAME+"\n"+selfCheck+"\nWi-Fi IPv4: "+(hasWifi?"利用可能":"なし／選べません")+"\n"+message;
         if(member){
             text+=publicGroup;

@@ -95,7 +95,7 @@ public class ReviewStorageFixTest {
             try(var loaded=f.storage().load(StorageGroupTest.CLOCK)){assertTrue(loaded.state.administrators().hasAdminBindings());assertTrue(loaded.management.legacyAdministratorBasis.isEmpty());assertFalse(loaded.storageBlocked);}
         }
     }
-    @Test public void candidateLessActiveCannotClearThroughNormalSaveOrRecovery()throws Exception{
+    @Test public void candidateLessActiveNeedsVerifiedRecoveryInsteadOfNormalSave()throws Exception{
         try(var g=LanGroup.create(54321,StorageGroupTest.CLOCK,new java.security.SecureRandom())){
             f.storage().save(g);var body=revocation(g,StoredUpdatesTest.key(81));
             f.marker.marker().active(new StopMarker.Target(g.saveSeq,body.version(),new byte[32],new byte[32],StopMarker.RECEIVED));
@@ -105,8 +105,8 @@ public class ReviewStorageFixTest {
                 var request=f.request(loaded,body,true);
                 assertThrows(RuntimeException.class,()->hooks.clear(request));
                 var covers=CorePersistenceCoordinator.RecoveryRequirement.class.getDeclaredMethod("covers",AdminRecords.Record.class);covers.setAccessible(true);
-                assertEquals(false,covers.invoke(loaded.recoveryRequirement,body));
-                assertThrows(RuntimeException.class,()->hooks.active(request));
+                assertEquals(true,covers.invoke(loaded.recoveryRequirement,body));
+                hooks.active(request);
                 assertEquals(StopMarker.Status.ACTIVE,f.marker.marker().inspect().status());
             }
         }

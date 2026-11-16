@@ -41,6 +41,7 @@ final class GroupStateStorage {
             if(group.management!=null)six.inspect(group);else if(six!=null)six.inspectLegacy(group);
             // 保存時の形で停止印を照合したあとに、失効相手と更新待ちを整理する。
             // Clean up revoked peers and pending renewals after checking the marker against the saved shape.
+            group.cleanPendingRenewals();
             group.forgetRevokedPeer();
             if(group.revokedPeerForgotten&&!group.storageBlocked&&(six==null||group.management!=null))try{save(group);}catch(Exception e){diagnostic("LAN_REVOKED_PEER_SAVE_FAILED");}
             observeSize(wire.length);var result=group;group=null;return result;

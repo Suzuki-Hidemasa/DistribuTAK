@@ -29,13 +29,22 @@ final class ManagementState {
         final byte[] winner,received;
         final StopMarker.Target target,previous;
         final List<byte[]> previousSubjects;
+        int basisPrefix;
+        long basisAdministrators,basisRevocations;
+        byte[] basisWinner;
         Checkpoint(long number,long generation,int prefix,long administrators,long revocations,byte[] winner,byte[] received,
                    StopMarker.Target target,StopMarker.Target previous,List<byte[]> previousSubjects){
             this.number=number;this.generation=generation;this.prefix=prefix;administratorVersion=administrators;revocationVersion=revocations;
             this.winner=winner.clone();this.received=received.clone();this.target=target;this.previous=previous;this.previousSubjects=previousSubjects==null?null:copy(previousSubjects);
         }
-        Checkpoint digest(byte[] digest){return new Checkpoint(number,generation,prefix,administratorVersion,revocationVersion,winner,received,
-                new StopMarker.Target(target.saveSeq(),target.requiredVersion(),digest,target.revocationDigest(),target.reason()),previous,previousSubjects);}
+        Checkpoint basis(AdminRecordStore.Snapshot snapshot){
+            basisPrefix=snapshot.records().size();basisAdministrators=snapshot.administratorVersion();
+            basisRevocations=snapshot.revocationVersion();basisWinner=snapshot.revocations();return this;
+        }
+        Checkpoint digest(byte[] digest){var result=new Checkpoint(number,generation,prefix,administratorVersion,revocationVersion,winner,received,
+                new StopMarker.Target(target.saveSeq(),target.requiredVersion(),digest,target.revocationDigest(),target.reason()),previous,previousSubjects);
+            result.basisPrefix=basisPrefix;result.basisAdministrators=basisAdministrators;result.basisRevocations=basisRevocations;
+            result.basisWinner=basisWinner==null?null:basisWinner.clone();return result;}
     }
     ManagementState(long generation,AdminRecordStore.Snapshot snapshot,List<byte[]> union,List<byte[]> roster,List<byte[]> legacy,
                     Map<String,String> aliases,Map<String,long[]> reservations,List<byte[]> outgoing,List<byte[]> basis,
@@ -131,10 +140,20 @@ final class ManagementState {
                     ||!Crypto.equal(CorePersistenceCoordinator.revocationDigest(past.revokedSubjects()),checkpoint.target.revocationDigest())
                     ||!contains(union,past.revokedSubjects()))throw new IOException("checkpoint の失効根拠が違います");
             if(checkpoint.previous!=null){var previous=checkpoint.previous;
-                if(checkpoint.target.reason()!=StopMarker.RECOVERY||body.version()<previous.requiredVersion()
-                        ||!(Crypto.equal(CorePersistenceCoordinator.revocationDigest(body.entries()),previous.revocationDigest())
+                boolean covered;
+                if(previous.candidateLess()){
+                    if(checkpoint.basisPrefix<1||checkpoint.basisPrefix>checkpoint.prefix||checkpoint.basisWinner==null||checkpoint.previousSubjects==null)
+                        throw new IOException("復旧前の根拠がありません");
+                    var basis=new AdminRecordStore.Snapshot(snapshot.records().subList(0,checkpoint.basisPrefix),snapshot.anchorSignature(),
+                            checkpoint.basisWinner,checkpoint.basisAdministrators,checkpoint.basisRevocations);
+                    var old=LanGroup.restore(group.groupId,group.urlAdmin,basis,clock);
+                    try{covered=sameSubjects(old.revokedSubjects(),checkpoint.previousSubjects)&&contains(body.entries(),old.revokedSubjects());}
+                    finally{old.clear();}
+                }else covered=Crypto.equal(CorePersistenceCoordinator.revocationDigest(body.entries()),previous.revocationDigest())
                         ||checkpoint.previousSubjects!=null&&Crypto.equal(CorePersistenceCoordinator.revocationDigest(checkpoint.previousSubjects),previous.revocationDigest())
-                            &&contains(body.entries(),checkpoint.previousSubjects)))
+                            &&contains(body.entries(),checkpoint.previousSubjects);
+                if(checkpoint.target.reason()!=StopMarker.RECOVERY||body.version()<previous.requiredVersion()
+                        ||!covered)
                     throw new IOException("復旧の根拠が違います");
             }
         }finally{past.clear();}
@@ -162,7 +181,7 @@ final class ManagementState {
     byte[] encode(boolean omitDigest)throws IOException{
         checkHistory(snapshot);
         try(var buffer=new LimitedOutput();var out=new DataOutputStream(buffer)){
-            out.writeInt(1);out.writeLong(generation);list(out,snapshot.records());bytes(out,snapshot.anchorSignature());bytes(out,snapshot.revocations());
+            out.writeInt(checkpoint!=null&&checkpoint.basisWinner!=null?2:1);out.writeLong(generation);list(out,snapshot.records());bytes(out,snapshot.anchorSignature());bytes(out,snapshot.revocations());
             out.writeLong(snapshot.administratorVersion());out.writeLong(snapshot.revocationVersion());bytes(out,snapshot.announcement());
             list(out,union);list(out,roster);list(out,legacyPermissions);list(out,legacyAdministratorBasis);
             out.writeInt(aliases.size());for(var entry:aliases.entrySet()){out.writeUTF(entry.getKey());out.writeUTF(entry.getValue());}
@@ -172,13 +191,14 @@ final class ManagementState {
             out.writeLong(cp.number);out.writeLong(cp.generation);out.writeInt(cp.prefix);out.writeLong(cp.administratorVersion);out.writeLong(cp.revocationVersion);
             bytes(out,cp.winner);bytes(out,cp.received);target(out,cp.target,omitDigest);out.writeBoolean(cp.previous!=null);if(cp.previous!=null)target(out,cp.previous,false);
             out.writeBoolean(cp.previousSubjects!=null);if(cp.previousSubjects!=null)list(out,cp.previousSubjects);
+            if(cp.basisWinner!=null){out.writeInt(cp.basisPrefix);out.writeLong(cp.basisAdministrators);out.writeLong(cp.basisRevocations);bytes(out,cp.basisWinner);}
             out.flush();return buffer.toByteArray();
         }
     }
     static ManagementState decode(byte[] plain)throws IOException{
         if(plain.length>MAX_BYTES)throw new IOException("管理状態が上限です");
         try(var in=new DataInputStream(new ByteArrayInputStream(plain))){
-            if(in.readInt()!=1)throw new IOException("管理形式が違います");long generation=in.readLong();if(generation<=0)throw new IOException("管理世代が違います");
+            int format=in.readInt();if(format!=1&&format!=2)throw new IOException("管理形式が違います");long generation=in.readLong();if(generation<=0)throw new IOException("管理世代が違います");
             var history=list(in,MAX_HISTORY);byte[] anchor=bytes(in,false),revocations=bytes(in,false);long av=in.readLong(),rv=in.readLong();
             var snapshot=new AdminRecordStore.Snapshot(history,anchor,revocations,av,rv,bytes(in,true));checkHistory(snapshot);
             var union=list(in,65_536);byte[] prior=null;for(byte[] id:union){
@@ -192,6 +212,10 @@ final class ManagementState {
             byte[] winner=bytes(in,false),received=bytes(in,false);var target=target(in);int previous=in.readUnsignedByte();if(previous>1)throw new IOException("復旧の印が違います");
             var oldTarget=previous==1?target(in):null;int hasSubjects=in.readUnsignedByte();if(hasSubjects>1)throw new IOException("復旧集合の印が違います");
             var cp=new Checkpoint(number,cpGeneration,prefix,admins,revoked,winner,received,target,oldTarget,hasSubjects==1?list(in,65_536):null);
+            if(format==2){
+                if(oldTarget==null||!oldTarget.candidateLess())throw new IOException("候補なしの復旧根拠ではありません");
+                cp.basisPrefix=in.readInt();cp.basisAdministrators=in.readLong();cp.basisRevocations=in.readLong();cp.basisWinner=bytes(in,false);
+            }
             if(in.available()!=0)throw new IOException("管理状態に余分な値があります");
             return new ManagementState(generation,snapshot,union,roster,legacy,aliases,reservations,outgoing,basis,CorePersistenceCoordinator.StopReason.values()[reason],cp);
         }

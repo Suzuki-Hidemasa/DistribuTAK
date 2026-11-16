@@ -57,6 +57,15 @@ public final class ManagementPageSender {
         if(pages<1||pages>ManagementPage.MAX_PAGES)return Offer.INVALID;
         return pages<=480?Offer.ACCEPTED:Offer.DHT_TRANSFER_OR_INVITATION;
     }
+    /**
+     * 認証済みの現在のセッションと異なる同じ相手への送信を解放する。残す送信の期限や予算は変えない。
+     * <p>
+     * Releases transmissions to this peer that differ from the authenticated current session, without changing retained deadlines or budgets.
+     */
+    public void discardOtherSessions(byte[] peer,byte[] session,long generation){
+        Crypto.length(peer,32);Crypto.length(session,16);var key=new DhtId(peer);
+        for(var out:all())if(out.peer.equals(key)&&(out.generation!=generation||!Arrays.equals(out.session,session)))remove(out,false);
+    }
     public Offer offer(byte[] peer,byte[] session,long generation,ManagementPage.Kind kind,byte[] operation,byte[] data,int entries,boolean notice){
         Crypto.length(peer,32);Crypto.length(session,16);Crypto.length(operation,16);Objects.requireNonNull(kind);
         if(data==null||data.length<1||data.length>ManagementPage.MAX_TOTAL_BYTES||entries<0||entries>ManagementPage.MAX_ENTRIES)return Offer.INVALID;
