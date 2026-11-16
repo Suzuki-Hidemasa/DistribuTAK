@@ -8,6 +8,9 @@ import io.github.hidemas_suzuki_aka_ziek.distributak.core.Crypto;
 import java.time.Clock;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.Comparator;
+import java.util.IdentityHashMap;
+import java.util.List;
 
 /**
  * 管理用 DHT 記録の権限・版・競合の判定（04 §4.5）。構文・鍵・署名は {@link ManagedDhtRecord#verifyStructure} が先に調べる。
@@ -207,20 +210,42 @@ public final class ManagedVerifier {
         if(order==0)order=AdminRecords.compareBytes(wrapped.signedBytes(),held.inner().signedBytes());
         return ranked(candidate,held,order);
     }
-    int comparePending(ManagedDhtRecord a,ManagedDhtRecord b) {
+    private record PendingRank(ManagedDhtRecord record,KeyAnnouncement announcement,long certificateTime){}
+    /**
+     * その通しの順位を先にそろえ、比較中は依存本体を読み直さない。
+     * <p>
+     * Captures ranks for one pass without rereading dependency bodies during comparisons.
+     */
+    Comparator<ManagedDhtRecord> pendingOrder(List<ManagedDhtRecord> records) {
+        var ranks=new IdentityHashMap<ManagedDhtRecord,PendingRank>();
+        for(var record:records){
+            if(ranks.containsKey(record))continue;
+            var announcement=record.kind()==DhtKeys.WRAPPED_KEY&&dependencies!=null
+                    ?dependencies.announcement(record.inner().field(4)):null;
+            ranks.put(record,new PendingRank(record,announcement,
+                    record.kind()==DhtKeys.WRAPPED_KEY?pendingCertificateTime(record):Long.MIN_VALUE));
+        }
+        return (a,b)->comparePending(ranks.get(a),ranks.get(b));
+    }
+    private static int comparePending(PendingRank ar,PendingRank br) {
+        var a=ar.record();var b=br.record();
+        if(a.kind()==DhtKeys.WRAPPED_KEY){
+            int readable=Boolean.compare(ar.announcement()!=null,br.announcement()!=null);
+            if(readable!=0)return readable;
+        }
         int order=Long.compare(a.version(),b.version());
         if(order!=0)return order;
         if(a.kind()==DhtKeys.KEY_ANNOUNCEMENT)order=KeyAnnouncement.compare(a.announcement(),b.announcement());
         else if(a.kind()==DhtKeys.WRAPPED_KEY){
-            var aa=dependencies==null?null:dependencies.announcement(a.inner().field(4));
-            var ba=dependencies==null?null:dependencies.announcement(b.inner().field(4));
+            var aa=ar.announcement();var ba=br.announcement();
             if(aa!=null&&ba!=null)order=KeyAnnouncement.compare(aa,ba);
-            if(order==0)order=Long.compare(pendingCertificateTime(a),pendingCertificateTime(b));
+            if(order==0)order=Long.compare(ar.certificateTime(),br.certificateTime());
             if(order==0)order=Long.compare(a.inner().signedAt(),b.inner().signedAt());
             if(order==0)order=AdminRecords.compareBytes(a.inner().signedBytes(),b.inner().signedBytes());
         }else order=AdminRecords.compare(a.inner(),b.inner());
         if(order==0)order=Long.compare(a.signedAt(),b.signedAt());
         if(order==0)order=Long.compare(a.publicationSeq(),b.publicationSeq());
+        if(order==0)order=AdminRecords.compareBytes(a.encode(),b.encode());
         return order;
     }
     private static long pendingCertificateTime(ManagedDhtRecord record) {

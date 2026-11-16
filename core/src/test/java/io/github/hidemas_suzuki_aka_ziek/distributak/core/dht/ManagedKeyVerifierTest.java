@@ -291,4 +291,138 @@ class ManagedKeyVerifierTest {
         }
     }
 
+    @Test void partiallyAvailableAnnouncementsHaveOneOrderForAllSixArrivals() {
+        var high=announce(3,NOW);var missing=announce(3,NOW-1);var low=announce(3,NOW-2);
+        var a=wrap(high,certificate,NOW-2,1);
+        var b=wrap(missing,certificate,NOW-1,1);
+        var c=wrap(low,cert(certificate.issuedAt(),2,handshake),NOW,2);
+        announcements.remove(missing);
+        for(var order:List.of(List.of(a,b,c),List.of(a,c,b),List.of(b,a,c),
+                List.of(b,c,a),List.of(c,a,b),List.of(c,b,a))){
+            var pending=new ManagedPending(clock);
+            for(var r:order)assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+            var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
+            var applied=new ArrayList<ManagedDhtRecord>();
+            var checked=pending.retry(verifier,held::get,result->{
+                applied.add(result.record());held.put(result.record().key(),result.record());
+            });
+            assertEquals(List.of(a),applied);
+            assertSame(a,held.get(a.key()));
+            assertEquals(List.of(a,c),checked.stream().map(ManagedPending.Checked::record).toList());
+            assertEquals(List.of(ACCEPTED,INVALID),checked.stream().map(r->r.verdict().status()).toList());
+            assertEquals(1,pending.size());assertEquals(b.encode().length,pending.bytes());
+        }
+    }
+    @Test void sortingReadsEachAnnouncementOnceBeforeJudging() {
+        var a=wrap(announce(3,NOW),certificate,NOW-2,1);
+        var b=wrap(announce(3,NOW-1),certificate,NOW-1,1);
+        var c=wrap(announce(3,NOW-2),certificate,NOW,1);
+        var reads=new java.util.HashMap<KeyAnnouncement,Integer>();
+        verifier=new ManagedVerifier(new AdminStateTrust(state),clock,union,new ManagedDependencies(){
+            public KeyAnnouncement announcement(byte[] digest){
+                var found=announcements.stream().filter(value->Crypto.equal(Crypto.blake2s(value.signedBytes()),digest)).findFirst().orElse(null);
+                reads.merge(found,1,Integer::sum);return found;
+            }
+            public AdminRecords.Record revocations(long version,byte[] digest){return revocations.get(0);}
+        });
+        var pending=new ManagedPending(clock);
+        for(var r:List.of(c,b,a))assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        var first=new java.util.concurrent.atomic.AtomicBoolean(true);
+        var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
+        pending.retry(verifier,key->{
+            if(first.getAndSet(false)){
+                assertEquals(3,reads.size());assertTrue(reads.values().stream().allMatch(count->count==1));
+            }
+            return held.get(key);
+        },result->held.put(result.record().key(),result.record()));
+        assertSame(a,held.get(a.key()));assertEquals(0,pending.size());
+    }
+    @Test void applicationCannotReenterAnyPendingOperation() {
+        var a=announce(3,NOW);var r=wrap(a,certificate,NOW,1);
+        var pending=new ManagedPending(clock);assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        var checked=pending.retry(verifier,key->null,result->{
+            assertThrows(IllegalStateException.class,()->pending.retry(verifier,key->null,c->fail()));
+            assertThrows(IllegalStateException.class,()->pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+            assertThrows(IllegalStateException.class,()->pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,member));
+            assertThrows(IllegalStateException.class,pending::size);
+            assertThrows(IllegalStateException.class,pending::bytes);
+        });
+        assertEquals(1,checked.size());assertEquals(0,pending.size());assertEquals(0,pending.bytes());
+    }
+    @Test void expiryDuringApplicationCannotSubtractCapacityTwice() {
+        var time=new java.util.concurrent.atomic.AtomicLong(NOW);
+        Clock moving=new Clock(){
+            public java.time.ZoneId getZone(){return ZoneOffset.UTC;}
+            public Clock withZone(java.time.ZoneId zone){return this;}
+            public Instant instant(){return Instant.ofEpochMilli(time.get());}
+        };
+        var a=announce(3,NOW);var r=wrap(a,certificate,NOW,1);
+        var pending=new ManagedPending(moving);assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        pending.retry(verifier,key->null,result->{
+            time.addAndGet(ManagedPending.MAX_AGE_MILLIS);
+            assertThrows(IllegalStateException.class,pending::size);
+            assertThrows(IllegalStateException.class,pending::bytes);
+            assertThrows(IllegalStateException.class,()->pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        });
+        assertEquals(0,pending.size());assertEquals(0,pending.bytes());
+        assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        assertEquals(r.encode().length,pending.bytes());
+    }
+    @Test void applicationFailureRestoresOnlyTheFailedEntryWithItsOriginalDeadline() {
+        var time=new java.util.concurrent.atomic.AtomicLong(NOW);
+        Clock moving=new Clock(){
+            public java.time.ZoneId getZone(){return ZoneOffset.UTC;}
+            public Clock withZone(java.time.ZoneId zone){return this;}
+            public Instant instant(){return Instant.ofEpochMilli(time.get());}
+        };
+        var first=wrap(announce(5,NOW),certificate,NOW,1);
+        var failed=wrap(announce(4,NOW),certificate,NOW,1);
+        var last=wrap(announce(3,NOW),certificate,NOW,1);
+        var pending=new ManagedPending(moving);
+        for(var r:List.of(last,failed,first))assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        time.addAndGet(60000);
+        var failure=new IllegalArgumentException("application failure");
+        var applied=new ArrayList<ManagedDhtRecord>();
+        assertSame(failure,assertThrows(IllegalArgumentException.class,()->pending.retry(verifier,key->null,result->{
+            if(result.record()==failed)throw failure;
+            applied.add(result.record());
+        })));
+        assertEquals(List.of(first),applied);assertEquals(2,pending.size());
+        assertEquals(failed.encode().length+last.encode().length,pending.bytes());
+        var checked=pending.retry(verifier,key->null,result->applied.add(result.record()));
+        assertEquals(List.of(failed,last),checked.stream().map(ManagedPending.Checked::record).toList());
+        assertEquals(0,pending.bytes());
+        var deadlinePending=new ManagedPending(moving);
+        assertTrue(deadlinePending.offer(failed,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        time.addAndGet(60000);
+        assertThrows(IllegalArgumentException.class,()->deadlinePending.retry(verifier,key->null,result->{throw failure;}));
+        time.addAndGet(59999);assertEquals(1,deadlinePending.size());
+        time.incrementAndGet();assertEquals(0,deadlinePending.size());assertEquals(0,deadlinePending.bytes());
+    }
+    @Test void wrappedKeyAndAdministratorDependencyResolveInOneRetry() {
+        var next=AdminProofFixtures.list(GROUP,1,NOW-100,List.of(pub(1),pub(2)),secret(1),secret(1),secret(2));
+        var listRecord=ManagedDhtRecord.issue(DhtKeys.LATEST_ADMINS,GROUP,secret(1),next,1,0,adminDigest(),NOW,null);
+        var a=announce(3,NOW);var w=wrap(a,certificate,NOW,1);
+        var wrapped=ManagedDhtRecord.issue(DhtKeys.WRAPPED_KEY,GROUP,secret(1),w.inner(),1,1,Crypto.blake2s(next.signedBytes()),NOW,certificate.encode());
+        assertTrue(AdminRecords.compareBytes(wrapped.key().bytes(),listRecord.key().bytes())<0);
+        var pending=new ManagedPending(clock);
+        for(var r:List.of(wrapped,listRecord))assertTrue(pending.offer(r,ManagedVerdict.needsVersion(1)));
+        var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
+        var checked=pending.retry(verifier,held::get,result->{
+            if(result.record().kind()==DhtKeys.LATEST_ADMINS)assertTrue(state.acceptAdministrators(next,v->fail()));
+            held.put(result.record().key(),result.record());
+        });
+        assertEquals(List.of(listRecord,wrapped),checked.stream().map(ManagedPending.Checked::record).toList());
+        assertTrue(checked.stream().allMatch(r->r.verdict().status()==ACCEPTED));
+        assertEquals(0,pending.size());assertEquals(0,pending.bytes());
+    }
+    @Test void retryWithoutProgressStopsAfterOnePass() {
+        var a=announce(3,NOW);var r=wrap(a,certificate,NOW,1);announcements.clear();
+        var pending=new ManagedPending(clock);assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        var reads=new java.util.concurrent.atomic.AtomicInteger();
+        assertTimeoutPreemptively(java.time.Duration.ofSeconds(2),()->{
+            assertTrue(pending.retry(verifier,key->{reads.incrementAndGet();return null;},c->fail()).isEmpty());
+        });
+        assertEquals(1,reads.get());assertEquals(1,pending.size());assertEquals(r.encode().length,pending.bytes());
+    }
 }
