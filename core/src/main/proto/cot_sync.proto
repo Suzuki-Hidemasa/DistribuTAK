@@ -74,11 +74,33 @@ message SyncSnapshot {
   repeated SyncStoredRecord records = 6; repeated SyncOrigin origins = 7;
 }
 
-// schema3 の専用管理入口。6 は予約し、製品で受ける操作は受信側で選ぶ。
+// schema3 の専用管理入口。6 は予約し、製品で受ける操作は受信側で選ぶ。11 は利用者の確認待ちの仮番号。
+// Dedicated schema3 management entry. Field 6 is reserved; receivers select supported operations. Field 11 is provisional pending user confirmation.
 message ManagementEnvelope {
   uint32 schema = 1;
   reserved 6;
-  oneof body { AdminControl admin_control = 8; ProofCertificateRenewal certificate_renewal = 9; }
+  oneof body {
+    ManagementPage revocation_page = 3;
+    ManagementPage directory_page = 4;
+    ManagementPage signed_announcement = 5;
+    ManagementPage directory_summary_page = 7;
+    AdminControl admin_control = 8;
+    ProofCertificateRenewal certificate_renewal = 9;
+    ManagementPageAck page_ack = 11;
+  }
+}
+// 全項目を明示する厳密なページ。生成クラスだけでは検証せず、ManagementPage で読む。
+// A strict page with every field explicit. Read through ManagementPage, not validation by generated classes alone.
+message ManagementPage {
+  uint32 schema = 1; uint32 kind = 2; bytes operation_id = 3; bytes group_id = 4;
+  bytes object_digest = 5; uint32 total_bytes = 6; uint32 page_index = 7;
+  uint32 page_count = 8; bytes data = 9; uint32 total_entries = 10;
+}
+// 断片の配送の確認だけで、署名済み記録の受理ではない。
+// Confirms page delivery only, not acceptance of a signed record.
+message ManagementPageAck {
+  uint32 schema = 1; bytes group_id = 2; bytes operation_id = 3; bytes object_digest = 4;
+  repeated uint32 page_index = 5 [packed = true];
 }
 message ProofCertificateRenewal {
   uint32 schema = 1; uint32 operation = 2; bytes group_id = 3; bytes request_id = 4;
