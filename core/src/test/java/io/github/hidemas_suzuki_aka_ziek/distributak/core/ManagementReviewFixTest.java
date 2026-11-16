@@ -73,6 +73,68 @@ class ManagementReviewFixTest {
         assertEquals(1,receiverCompleted,"sender completed="+sender.completed()+", receiver completed="+receiverCompleted);
         assertEquals(1,rostersCompleted);assertEquals(0,sender.failed());assertEquals(0,assembler.active());
     }
+    @Test void matchingDuplicateKeepsAssemblyAliveUntilTheNextNewPage(){
+        var all=pages(1,3072);assertEquals(INCOMPLETE,receive(all.get(0)).status());
+        clock.now=29000;var duplicate=receive(all.get(0));
+        assertEquals(DUPLICATE,duplicate.status());assertNotNull(duplicate.ack());assertNull(duplicate.completed());
+        clock.now=58000;assertEquals(INCOMPLETE,receive(all.get(1)).status());
+        var complete=receive(all.get(2));assertEquals(COMPLETE,complete.status());
+        assertArrayEquals(new byte[3072],complete.completed().data());assertEquals(0,resources.active());
+    }
+    @Test void matchingDuplicatesDoNotExtendTheOriginalTotalDeadline(){
+        var all=pages(1,2048);assertEquals(INCOMPLETE,receive(all.get(0)).status());
+        for(int i=1;i<=8;i++){
+            clock.now=i*29000;assertEquals(DUPLICATE,receive(all.get(0)).status());
+            assertEquals(1,assembler.active());assertEquals(2048,resources.reservedBytes());
+        }
+        clock.now=239999;assertEquals(DUPLICATE,receive(all.get(0)).status());
+        assertEquals(1,assembler.active());clock.now=240000;assembler.poll();
+        assertEquals(0,assembler.active());assertEquals(0,resources.reservedBytes());
+        assertEquals(INCOMPLETE,receive(all.get(1)).status());
+    }
+    @Test void resumedRosterCompletesAtBothEndsAfterOverThirtySecondsOfDuplicates(){
+        offer(ManagementPage.Kind.ROSTER,1,65536);
+        for(int i=0;i<12;i++){clock.now=i*1000;sender.poll();drain(false);}
+        assertEquals(48,sent.size());assertEquals(1,assembler.active());assertEquals(0,receiverCompleted);
+        sender.rotating(true);clock.now=12000;sender.rotating(false);
+        int duplicates=0;long firstDuplicate=-1,lastDuplicate=-1;
+        // 共有枠の他の送信で毎秒3件を使い、名簿は毎秒1ページだけ送り直す。
+        // Consume three sends each second from the shared budget, leaving one roster page per second.
+        for(int i=0;i<64;i++){
+            clock.now=12000+i*1000;assertTrue(budget.tryTake(peer(1),3));sender.poll();
+            while(read<sent.size()){
+                var page=sent.get(read++);var result=receive(page);
+                if(result.status()==DUPLICATE){
+                    duplicates++;if(firstDuplicate<0)firstDuplicate=clock.now;lastDuplicate=clock.now;
+                }
+                if(result.completed()!=null){receiverCompleted++;rostersCompleted++;}
+                if(result.ack()!=null)sender.acknowledge(peer(1),SESSION,1,result.ack());
+            }
+        }
+        assertEquals(1,sender.completed());
+        assertEquals(1,receiverCompleted,"sender completed="+sender.completed()+", receiver completed="+receiverCompleted);
+        assertEquals(1,rostersCompleted);assertEquals(48,duplicates);assertTrue(lastDuplicate-firstDuplicate>30000);
+        assertEquals(0,sender.failed());assertEquals(0,sender.heldBytes());assertEquals(0,resources.active());
+    }
+    @Test void resumedCompletedRosterUsesDuplicateAcksWithoutDeliveringAgain(){
+        offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();
+        // 完成まで受信するが、停止前のACKはすべて落とす。
+        // Receive through completion but drop every ACK before pausing.
+        while(read<sent.size()){
+            var result=receive(sent.get(read++));assertNotNull(result.ack());
+            if(result.completed()!=null)receiverCompleted++;
+        }
+        assertEquals(1,receiverCompleted);assertEquals(0,sender.completed());assertEquals(0,assembler.active());
+        sender.rotating(true);clock.now=1000;sender.rotating(false);sender.poll();
+        int duplicates=0;
+        while(read<sent.size()){
+            var result=receive(sent.get(read++));assertEquals(DUPLICATE,result.status());
+            assertNull(result.completed());assertNotNull(result.ack());duplicates++;
+            sender.acknowledge(peer(1),SESSION,1,result.ack());
+        }
+        assertEquals(2,duplicates);assertEquals(1,sender.completed());assertEquals(1,receiverCompleted);
+        assertEquals(0,sender.failed());assertEquals(0,sender.heldBytes());assertEquals(0,resources.reservedBytes());
+    }
     @Test void resumedRosterFailsAfterARevocationReplacesItDuringAFiveSecondPause(){
         offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();drain(true);sender.rotating(true);
         offer(ManagementPage.Kind.REVOCATION,2,1);clock.now=1000;sender.poll();drain(false);
@@ -111,7 +173,7 @@ class ManagementReviewFixTest {
         var a=pages(1,2048);var b=pages(2,2048);receive(a.get(0));clock.now=4000;
         assertEquals(INCOMPLETE,receive(b.get(0)).status());clock.now=5000;
         assertEquals(REJECTED,receive(a.get(0)).status());assertEquals(2048,resources.reservedBytes());
-        clock.now=33999;assertEquals(DUPLICATE,receive(b.get(0)).status());
+        clock.now=33999;assertEquals(REJECTED,receive(a.get(0)).status());
         clock.now=34000;assembler.poll();assertEquals(0,resources.active());
     }
     @Test void aCompletedOldFirstPageNeverReplacesAnUnfinishedNewObject(){

@@ -116,6 +116,9 @@ public final class ManagementPageAssembler {
             for(int i=0;i<data.length;i++)if(assembly.buffer[offset+i]!=data[i]){
                 remove(key);return result(Status.CORRUPT);
             }
+            // 一致する重複も進捗に数えるが、組立を作った時刻は変えない。
+            // Count matching duplicates as progress without changing the assembly creation time.
+            assembly.progress=now;
             return acknowledged(Status.DUPLICATE,null,page);
         }
         System.arraycopy(data,0,assembly.buffer,offset,data.length);assembly.have[index]=true;assembly.received++;assembly.progress=now;

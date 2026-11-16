@@ -74,9 +74,10 @@ class ManagementPageAssemblerTest {
         var result=receive(wrong);assertEquals(CORRUPT,result.status());assertNull(result.completed());
         assertEquals(0,resources.active());assertEquals(0,resources.reservedBytes());
     }
-    @Test void duplicatesDoNotExtendTheThirtySecondProgressDeadline() {
+    @Test void matchingDuplicatesRestartTheThirtySecondProgressDeadline() {
         var p=pages(2048).get(0);assertEquals(INCOMPLETE,receive(p).status());
         time.now+=29999;assertEquals(DUPLICATE,receive(p).status());
+        time.now+=29999;assembler.poll();assertEquals(1,assembler.active());assertEquals(2048,resources.reservedBytes());
         time.now++;assembler.poll();assertEquals(0,assembler.active());assertEquals(0,resources.reservedBytes());
     }
     @Test void realProgressCannotExtendThe240SecondTotalDeadline() {
