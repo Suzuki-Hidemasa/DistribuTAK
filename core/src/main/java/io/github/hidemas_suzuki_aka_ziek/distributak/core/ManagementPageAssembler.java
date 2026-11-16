@@ -18,7 +18,7 @@ import java.util.Objects;
  */
 public final class ManagementPageAssembler {
     public static final long PROGRESS_MILLIS=30_000,TOTAL_MILLIS=240_000;
-    public static final int MAX_REMEMBERED=8;
+    public static final int MAX_REMEMBERED=8,MAX_RETIRED=64;
     public enum Status {INCOMPLETE,DUPLICATE,COMPLETE,REJECTED,CORRUPT}
     /**
      * 完成した未検証の全体。署名・権限が有効だという意味は持たない。
@@ -87,6 +87,16 @@ public final class ManagementPageAssembler {
     private static void remember(java.util.ArrayDeque<Remembered> records,DhtId peer,Assembly assembly,long now){
         if(records.size()>=MAX_REMEMBERED)records.removeFirst();records.addLast(new Remembered(peer,assembly,now));
     }
+    private void rememberRetired(DhtId peer,Assembly assembly,long now){
+        // 相手ごとの最古を先に外し、全体の上限に達したときだけ他の相手の記録も外す。
+        // Evict the peer's oldest record first, and evict other peers' records only at the overall limit.
+        if(retired.stream().filter(r->r.peer.equals(peer)).count()>=MAX_REMEMBERED){
+            var iterator=retired.iterator();
+            while(iterator.hasNext())if(iterator.next().peer.equals(peer)){iterator.remove();break;}
+        }
+        if(retired.size()>=MAX_RETIRED)retired.removeFirst();
+        retired.addLast(new Remembered(peer,assembly,now));
+    }
     public ManagementPageAssembler(byte[] group,Clock clock,TransferResources resources){
         Crypto.length(group,32);this.group=group.clone();this.clock=Objects.requireNonNull(clock);this.resources=Objects.requireNonNull(resources);
     }
@@ -104,7 +114,7 @@ public final class ManagementPageAssembler {
         if(assembly!=null&&!assembly.matches(page,session,generation)){
             if(page.pageIndex()!=0||assembly.generation!=generation||!Arrays.equals(assembly.session,session)||sameTarget(assembly.first,page))
                 return result(Status.REJECTED);
-            remember(retired,key,assembly,now);remove(key);assembly=null;
+            rememberRetired(key,assembly,now);remove(key);assembly=null;
         }
         if(assembly==null){
             var lease=resources.acquire(key,page.totalBytes());if(lease==null)return result(Status.REJECTED);
@@ -148,7 +158,7 @@ public final class ManagementPageAssembler {
             if(assembly.expired(now)){
                 // 期限で捨てた対象の残りから新しい組立を作り、配送完了と誤認するのを防ぐ。
                 // Prevent a fresh assembly from expired target remnants from falsely confirming delivery.
-                remember(retired,entry.getKey(),assembly,now);iterator.remove();assembly.lease.close();
+                rememberRetired(entry.getKey(),assembly,now);iterator.remove();assembly.lease.close();
             }
         }
     }

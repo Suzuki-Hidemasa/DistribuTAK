@@ -55,18 +55,18 @@ class ManagementReviewFixTest {
     }
     @Test void boundaryWithDelayedFirstAckRejectsRemainingPages(){boundaryWait(1000,30500,100,100);}
     @Test void pageInTransitAcrossReceiverDeadlineIsRejected(){boundaryWait(0,29900,200,50);}
-    void delayedAckAfterExpiry(boolean evict){
+    void delayedAckAfterExpiry(int evictionPeer){
         offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();
         var oldAck=receive(sent.get(0)).ack();assertNotNull(oldAck);read=sent.size();
         sender.rotating(true);clock.now=31000;assembler.poll();assertEquals(0,assembler.active());
-        if(evict){
-            // 別の相手の8対象を期限切れにし、最初の対象を破棄記録から押し出す。
-            // Expire eight targets from another peer to evict the first target from retirement records.
-            for(int i=0;i<8;i++){
+        if(evictionPeer!=0){
+            // 指定した相手の対象を期限切れにして、破棄記録の上限を試す。
+            // Expire targets from the specified peer to exercise the retirement limit.
+            for(int i=0;i<(evictionPeer==1?8:10);i++){
                 var first=pages(10+i,2048).get(0);
-                assertEquals(INCOMPLETE,assembler.receive(peer(2),SESSION,1,first).status());
+                assertEquals(INCOMPLETE,assembler.receive(peer(evictionPeer),SESSION,1,first).status());
                 clock.now--;assembler.poll();
-                if(i<7)assertRejectedWithoutAck(receive(sent.get(0)));
+                if(i<7&&evictionPeer==1)assertRejectedWithoutAck(receive(sent.get(0)));
             }
         }
         sender.rotating(false);sender.poll();
@@ -75,15 +75,61 @@ class ManagementReviewFixTest {
         read++;drain(false);sender.acknowledge(peer(1),SESSION,1,oldAck);
     }
     @Test void delayedPrePauseAckCannotCompleteAnExpiredRoster(){
-        delayedAckAfterExpiry(false);
+        delayedAckAfterExpiry(0);
         assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(1,rejected);
         clock.now=61000;sender.poll();assertEquals(1,sender.failed());assertEquals(0,sender.heldBytes());
         assertEquals(0,resources.active());
     }
     @Test void evictingEightRetiredTargetsCanAgainCompleteOnlyAtTheSender(){
-        delayedAckAfterExpiry(true);
+        delayedAckAfterExpiry(1);
         assertEquals(1,sender.completed());assertEquals(0,receiverCompleted);assertEquals(0,sender.failed());
         assertEquals(1,assembler.active());assertEquals(2048,resources.reservedBytes());
+    }
+    @Test void anotherPeerCannotEvictAnExpiredRosterAndCompleteOnlyAtTheSender(){
+        delayedAckAfterExpiry(2);
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(1,rejected);
+        clock.now=61000;sender.poll();assertEquals(1,sender.failed());assertEquals(0,resources.active());
+    }
+    @Test void anotherPeersFirstPagesCannotEvictAReplacedRosterDespiteAStaleAck(){
+        offer(ManagementPage.Kind.ROSTER,1,2048);sender.poll();
+        var staleAck=receive(sent.get(0)).ack();assertNotNull(staleAck);read=sent.size();
+        sender.rotating(true);
+        assertEquals(COMPLETE,receive(pages(2,1).get(0)).status());
+        for(int i=0;i<10;i++)assertEquals(INCOMPLETE,
+                assembler.receive(peer(2),SESSION,1,pages(10+i,2048).get(0)).status());
+        sender.rotating(false);sender.poll();read++;drain(false);
+        sender.acknowledge(peer(1),SESSION,1,staleAck);
+        assertEquals(0,sender.completed());assertEquals(0,receiverCompleted);assertEquals(1,rejected);
+        for(var page:sent)assertRejectedWithoutAck(receive(page));
+        clock.now=30000;sender.poll();assembler.poll();
+        assertEquals(1,sender.failed());assertEquals(0,resources.active());
+    }
+    void retireByReplacement(int peerId,int operation){
+        assertEquals(INCOMPLETE,assembler.receive(peer(peerId),SESSION,1,pages(operation,2048).get(0)).status());
+        assertEquals(COMPLETE,assembler.receive(peer(peerId),SESSION,1,pages(100+operation,1).get(0)).status());
+    }
+    void assertRetired(int peerId,int operation){
+        for(var page:pages(operation,2048))assertRejectedWithoutAck(assembler.receive(peer(peerId),SESSION,1,page));
+    }
+    @Test void ninthRetirementEvictsOnlyThatPeersOldestRecord(){
+        retireByReplacement(2,1);
+        for(int i=1;i<=8;i++)retireByReplacement(1,i);
+        for(int i=1;i<=8;i++)assertRetired(1,i);
+        retireByReplacement(1,9);
+        assertRetired(2,1);for(int i=2;i<=9;i++)assertRetired(1,i);
+        var oldest=pages(1,2048);
+        assertEquals(INCOMPLETE,receive(oldest.get(1)).status());
+        assertEquals(COMPLETE,receive(oldest.get(0)).status());assertEquals(0,resources.active());
+    }
+    @Test void sixtyFifthRetirementEvictsTheGlobalOldestRecord(){
+        for(int peerId=1;peerId<=8;peerId++)for(int i=1;i<=8;i++)retireByReplacement(peerId,i);
+        for(int peerId=1;peerId<=8;peerId++)for(int i=1;i<=8;i++)assertRetired(peerId,i);
+        retireByReplacement(9,1);
+        assertRetired(9,1);
+        for(int peerId=1;peerId<=8;peerId++)for(int i=1;i<=8;i++)if(peerId!=1||i!=1)assertRetired(peerId,i);
+        var oldest=pages(1,2048);
+        assertEquals(INCOMPLETE,receive(oldest.get(1)).status());
+        assertEquals(COMPLETE,receive(oldest.get(0)).status());assertEquals(0,resources.active());
     }
     @Test void expiredTargetIsRejectedUntilRetentionEndsButNewOperationCanComplete(){
         var old=pages(1,2048);receive(old.get(0));clock.now=30000;assembler.poll();
