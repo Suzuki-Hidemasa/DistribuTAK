@@ -218,7 +218,8 @@ public final class AdminState {
         if(certificate.kind()!=CERTIFICATE||!Crypto.equal(group,certificate.group())||!certificate.hasValidSignature()
                 ||!certificate.verifyIdentityBinding()||!administrators().hasEntry(certificate.signer()))
             throw new SecurityException("保存した旧証明書が無効です");
-        legacyCertificates.computeIfAbsent(identityName(certificate.field(0)),ignored->new java.util.ArrayList<>()).add(certificate.encode());
+        var values=legacyCertificates.computeIfAbsent(identityName(certificate.field(0)),ignored->new java.util.ArrayList<>());
+        byte[] encoded=certificate.encode();if(values.stream().noneMatch(value->java.util.Arrays.equals(value,encoded)))values.add(encoded);
     }
     /** 入り直し候補へ、前の保存で許可済みの正確な証明書だけを引き継ぐ。 */
     public void inheritStoredLegacyCertificate(AdminState previous,AdminRecords.Record certificate) {
@@ -232,6 +233,41 @@ public final class AdminState {
         var values=legacyCertificates.get(identityName(certificate.field(0)));
         if(values!=null)for(byte[] value:values)if(java.util.Arrays.equals(value,certificate.encode()))return true;
         return false;
+    }
+    /**
+     * 正確な旧許可を履歴の管理者権限と照合して一括復元する。
+     * <p>
+     * Atomically restores exact legacy permissions after checking historical administrator authority.
+     */
+    public synchronized void restoreStoredLegacyCertificates(java.util.List<byte[]> encoded){
+        var records=new java.util.ArrayList<AdminRecords.Record>();
+        for(byte[] bytes:encoded){var certificate=AdminRecords.decode(bytes);if(certificate.format()!=1)throw new SecurityException("旧許可の形式が違います");
+            verifyStoredCertificateEvidence(certificate,false);records.add(certificate);}
+        for(var certificate:records){var values=legacyCertificates.computeIfAbsent(identityName(certificate.field(0)),ignored->new java.util.ArrayList<>());
+            byte[] bytes=certificate.encode();if(values.stream().noneMatch(value->java.util.Arrays.equals(value,bytes)))values.add(bytes);}
+    }
+    /**
+     * 保存名簿の署名根拠だけを検査する。期限切れ・失効済みの項目から通信権限を作らない。
+     * <p>
+     * Verifies only signature evidence for a saved roster, granting no communication rights to expired or revoked entries.
+     */
+    public synchronized void verifyStoredCertificateEvidence(AdminRecords.Record certificate){verifyStoredCertificateEvidence(certificate,true);}
+    private void verifyStoredCertificateEvidence(AdminRecords.Record certificate,boolean requirePermission){
+        if(certificate.kind()!=CERTIFICATE||!Crypto.equal(group,certificate.group())||!certificate.hasValidSignature()||!certificate.verifyIdentityBinding()
+                ||requirePermission&&certificate.format()==1&&!permitsLegacy(certificate))throw new SecurityException("保存証明書の根拠が違います");
+        boolean authorized=false;for(byte[] encoded:journal){var record=AdminRecords.decode(encoded);
+            if(record.kind()==ADMINS&&record.hasEntry(certificate.signer())){authorized=true;break;}}
+        if(!authorized)throw new SecurityException("保存証明書の管理者根拠がありません");
+    }
+    /**
+     * 正確な旧許可の防御的な写しを返す。
+     * <p>
+     * Returns defensive copies of exact legacy permissions.
+     */
+    public synchronized java.util.List<byte[]> storedLegacyCertificates(){
+        var result=new java.util.ArrayList<byte[]>();
+        new java.util.TreeMap<>(legacyCertificates).values().forEach(values->{for(byte[] value:values)result.add(value.clone());});
+        return java.util.List.copyOf(result);
     }
     public synchronized void forgetLegacyCertificate(byte[] identity){legacyCertificates.remove(identityName(identity));}
     /** SessionManagerの作成前に呼ぶ。更新不要ならnull。保存は呼び出し元が行う。 */

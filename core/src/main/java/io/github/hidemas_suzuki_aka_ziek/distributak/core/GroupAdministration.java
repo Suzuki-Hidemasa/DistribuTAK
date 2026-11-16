@@ -44,6 +44,7 @@ public final class GroupAdministration implements AutoCloseable {
     private final Clock clock;private final LongSupplier nanos;private final SecureRandom random;
     private final MemberDirectory directory;private final Map<String,Pending> pending=new HashMap<>();
     private byte[] administratorSecret,legacyAdministratorIdentity;private AdminRecords.Record certificate;
+    private List<byte[]> legacyAdministratorBasis=List.of();
     private volatile boolean closed,stopped;
     private KeyRotationCoordinator rotations;
     private SessionManager rotationSessions;
@@ -80,7 +81,36 @@ public final class GroupAdministration implements AutoCloseable {
         if(administratorSecret!=null&&Crypto.equal(Crypto.ed25519Public(administratorSecret),key))throw invalid();
         if(!Crypto.equal(certificate.group(),group)||!Crypto.equal(certificate.signer(),key)||!Crypto.equal(peer.signer(),key)
                 ||Crypto.equal(peer.field(0),certificate.field(0)))throw invalid();
-        legacyAdministratorIdentity=peer.field(0);
+        legacyAdministratorIdentity=peer.field(0);legacyAdministratorBasis=List.of(certificate.encode(),peer.encode());
+    }
+    /**
+     * 保存時に固定した対応の根拠を返す。署名一覧に対応があれば旧根拠を捨てる。
+     * <p>
+     * Returns evidence pinned at save time, discarding legacy evidence once signed bindings exist.
+     */
+    public synchronized List<byte[]> legacyAdministratorBasis(){
+        var list=state.administrators();
+        if(list.hasAdminBindings()||list.entries().size()!=1){legacyAdministratorIdentity=null;legacyAdministratorBasis=List.of();}
+        var result=new ArrayList<byte[]>();for(byte[] bytes:legacyAdministratorBasis)result.add(bytes.clone());return List.copyOf(result);
+    }
+    /**
+     * 保存した対応を検証して復元する。根拠証明書の期限だけを緩め、通信権限には変換しない。
+     * <p>
+     * Verifies and restores a saved mapping, relaxing only evidence expiry without granting communication authority.
+     */
+    public synchronized void restoreLegacyAdministratorBasis(List<byte[]> basis){
+        if(basis.isEmpty())return;
+        if(basis.size()!=2)throw invalid();var own=AdminRecords.decode(basis.get(0));var peer=AdminRecords.decode(basis.get(1));
+        var list=state.administrators();
+        if(own.format()!=1||list.hasAdminBindings()||list.entries().size()!=1||!Crypto.equal(own.field(0),certificate.field(0)))throw invalid();
+        byte[] key=list.entries().get(0);
+        if(administratorSecret!=null&&Crypto.equal(Crypto.ed25519Public(administratorSecret),key)
+                ||!Crypto.equal(own.group(),group)||!Crypto.equal(peer.group(),group)||!Crypto.equal(own.signer(),key)
+                ||!Crypto.equal(peer.signer(),key)||Crypto.equal(own.field(0),peer.field(0)))throw invalid();
+        if(!own.hasValidSignature()||!peer.hasValidSignature()||!own.verifyIdentityBinding()||!peer.verifyIdentityBinding())throw invalid();
+        state.trustStoredLegacyCertificate(own);state.trustStoredLegacyCertificate(peer);
+        state.verifyCertificate(own,own.field(1),true);state.verifyCertificate(peer,peer.field(1),true);
+        legacyAdministratorIdentity=peer.field(0);legacyAdministratorBasis=List.of(own.encode(),peer.encode());
     }
     private static SecurityException invalid(){return new SecurityException("管理操作の条件が一致しません");}
     private static String name(byte[] value){return Base64.getEncoder().encodeToString(value);}
@@ -96,11 +126,20 @@ public final class GroupAdministration implements AutoCloseable {
      */
     public synchronized KeyRotationCoordinator rotations(SessionManager sessions,
             io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.RevocationUnion union,Clock deadlines){
+        return rotations(sessions,union,deadlines,null);
+    }
+    /**
+     * Controller と同じ保存調整層を使い、セッションへ二重に登録しない。
+     * <p>
+     * Shares the Controller's persistence coordinator without registering twice on the session manager.
+     */
+    public synchronized KeyRotationCoordinator rotations(SessionManager sessions,
+            io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.RevocationUnion union,Clock deadlines,CorePersistenceCoordinator shared){
         requireAdministrator();
         if(rotations==null){
-            rotations=new KeyRotationCoordinator(state,sessions,union,administratorSecret,clock,deadlines,random,member,()->!closed&&!stopped);
+            rotations=new KeyRotationCoordinator(state,sessions,union,administratorSecret,clock,deadlines,random,member,()->!closed&&!stopped,shared);
             rotationSessions=sessions;rotationUnion=union;
-        }else if(rotationSessions!=sessions||rotationUnion!=union)throw invalid();
+        }else if(rotationSessions!=sessions||rotationUnion!=union||shared!=null&&rotations.persistence()!=shared)throw invalid();
         return rotations;
     }
     public synchronized AdminRecords.Record certificate(){return certificate;}

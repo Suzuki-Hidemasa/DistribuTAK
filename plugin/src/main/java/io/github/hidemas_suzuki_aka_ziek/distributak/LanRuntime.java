@@ -56,6 +56,13 @@ final class LanRuntime {
         void saveExternal(LanGroup group,ExternalMarks marks)throws Exception;
         Pending stage(LanGroup group)throws Exception;
         void acceptJoined(Future<?> joined,Pending pending)throws Exception;
+        default io.github.hidemas_suzuki_aka_ziek.distributak.core.CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){
+            throw new UnsupportedOperationException("管理保存の口がありません");
+        }
+        default void saveDirectory(LanGroup group,io.github.hidemas_suzuki_aka_ziek.distributak.core.MemberDirectory directory,java.util.Map<String,String> labels)throws Exception{
+            throw new UnsupportedOperationException("名簿保存の口がありません");
+        }
+        default void prepareNetwork(LanGroup group)throws Exception{}
         default boolean largeState(){return false;}
         default boolean saveIssuedRenewal(LanGroup group,byte[] peerId,byte[] certificate)throws Exception {
             throw new UnsupportedOperationException("発行済み更新の保存の口がありません");

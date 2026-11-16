@@ -17,6 +17,18 @@ public final class CorePersistenceCoordinator {
     public enum Operation {HANDSHAKE,RECOVERY_REQUEST,REVOCATION_PAGE,PAGE_ACK,COT_SEND,COT_RECEIVE,CATCH_UP,
         KEY_ANNOUNCEMENT,KEY_WRAP,KEY_APPLY,DHT_READ,DHT_WRITE,TRANSFER,ADMINISTRATION,ROSTER,INVITATION,RENEWAL,RECONNECT}
     public enum KeyResult {APPLIED,DEFERRED,REJECTED,CANCELLED,STALE}
+    public enum StopReason {NONE,STORAGE_FAILED,COMMITTED_NOT_APPLIED}
+    /**
+     * 保存の種類と正確な受信本体を候補へ結ぶ。復旧では元の停止要件を保持する。
+     * <p>
+     * Binds the persistence kind and exact received body to its candidate, retaining the original stop requirements during recovery.
+     */
+    public record PersistenceRequest(AdminRecordStore.Snapshot management,AdminRecords.Record revocations,
+            boolean received,boolean recovery,RecoveryRequirement requirement){
+        public PersistenceRequest{Objects.requireNonNull(management);Objects.requireNonNull(revocations);
+            if(recovery&&(!received||requirement==null))throw invalid();}
+        @Override public String toString(){return "Persistence request";}
+    }
     /**
      * active → 保存 → 照合と clear の順で呼ぶ。各段階は同期完了まで戻らない。印の実 I/O は第7回で実装する。
      * <p>
@@ -26,7 +38,22 @@ public final class CorePersistenceCoordinator {
         default void active(AdminRecordStore.Snapshot candidate){}
         void save(AdminRecordStore.Snapshot candidate);
         default void clear(AdminRecordStore.Snapshot candidate){}
+        default void active(PersistenceRequest request){active(request.management());}
+        default void save(PersistenceRequest request){save(request.management());}
+        default void clear(PersistenceRequest request){clear(request.management());}
         default void saveKey(byte[] key,long version){throw new UnsupportedOperationException("Key persistence required");}
+        /**
+         * 鍵と告知を含む候補全体を一括保存する。製品はこの入口を実装し、正常終了は保存確定を意味する。
+         * <p>
+         * Atomically saves the complete candidate including its key and announcement. The product implements this entry point; normal return means durable commit.
+         */
+        default void saveAcceptedKey(AdminRecordStore.Snapshot candidate,byte[] key,long version){saveKey(key,version);}
+        /**
+         * 署名候補を作る前に番号の上限を保存する。後の候補が失敗しても予約を戻さない。
+         * <p>
+         * Saves version ceilings before constructing signed candidates. Later candidate failure never rolls reservations back.
+         */
+        default void reserveRotationVersions(long keyVersion,long revocationVersion){}
         /**
          * 再発行の全候補を送信前に保存する。実ディスクでの一括保存は第7回で実装する。
          * <p>
@@ -42,6 +69,7 @@ public final class CorePersistenceCoordinator {
          * Reports that communication stopped. This hook must not throw exceptions.
          */
         default void stopped(){}
+        default void stopped(StopReason reason){stopped();}
         default void selfRevoked(){}
     }
     /**
@@ -61,6 +89,10 @@ public final class CorePersistenceCoordinator {
             if(subjects==null)return Crypto.equal(digest,revocationDigest(candidate.entries()));
             for(byte[] subject:subjects)if(!candidate.hasEntry(subject))return false;return true;
         }
+        public long version(){return version;}
+        public byte[] digest(){return digest.clone();}
+        public List<byte[]> subjects(){return subjects==null?null:canonical(subjects);}
+        @Override public String toString(){return "Recovery requirement";}
     }
     private record Notice(byte[] session,long generation,long began,byte[] record){}
     private final AdminState admin;
@@ -69,6 +101,7 @@ public final class CorePersistenceCoordinator {
     private final Clock wall,deadlines;
     private final byte[] group;
     private State state;
+    private StopReason stopReason=StopReason.NONE;
     private long operation,recoveryStarted;
     private RecoveryRequirement requirement;
     private byte[] recoveryPeer,recoverySession,recoveryOperation;
@@ -104,10 +137,12 @@ public final class CorePersistenceCoordinator {
             sessions.coordinate(this,requirement!=null);
         }
     }
+    boolean coordinates(AdminState admin,SessionManager sessions,RevocationUnion union){return this.admin==admin&&this.sessions==sessions&&revocations==union;}
     private static IllegalArgumentException invalid(){return new IllegalArgumentException("Invalid persistence or recovery state");}
     public State state(){synchronized(sessions){return state;}}
+    public StopReason stopReason(){synchronized(sessions){return stopReason;}}
     public String statusText(){synchronized(sessions){
-        return state==State.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS||state==State.PERSISTING&&requirement!=null?"保存がいっぱい":"";
+        return state==State.STORAGE_FAILED&&stopReason==StopReason.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS||state==State.PERSISTING&&requirement!=null?"保存がいっぱい":"";
     }}
     public boolean isRevoked(byte[] subject){synchronized(sessions){
         return revocations.contains(subject)||requirement!=null&&requirement.subjects!=null
@@ -142,6 +177,17 @@ public final class CorePersistenceCoordinator {
                 default->throw invalid();
             }
         }catch(java.io.IOException|IllegalArgumentException bad){throw new SecurityException("Recovery traffic only");}
+    }
+    /**
+     * 通常保存の間だけ通信を待たせ、セッションと元の期限を保つ。I/O は共有ロックの外で行う。
+     * <p>
+     * Suspends communication during an ordinary save, preserving sessions and original deadlines. Runs I/O outside shared locks.
+     */
+    public void saveUnchanged(Runnable save){
+        Objects.requireNonNull(save);final long token;
+        synchronized(sessions){require(Operation.ADMINISTRATION);state=State.PERSISTING;token=++operation;}
+        try{save.run();}
+        finally{synchronized(sessions){if(operation==token&&state==State.PERSISTING){sessions.refresh();state=State.RUNNING;}}}
     }
     private boolean recoveryExpired(){return deadlines.millis()-recoveryStarted>=ManagementPageAssembler.TOTAL_MILLIS;}
     public void poll(){synchronized(sessions){
@@ -182,7 +228,8 @@ public final class CorePersistenceCoordinator {
             token=++operation;
             state=State.PERSISTING;
         }
-        boolean committed=false;
+        boolean committed=false,durable=false;
+        var request=new PersistenceRequest(next,candidate,received,recovery,requirement);
         try(persistence;addition){
             synchronized(sessions){
                 if(received){
@@ -195,16 +242,17 @@ public final class CorePersistenceCoordinator {
                     sessions.rejectRevokedPeers();
                 }
             }
-            if(received)hooks.active(next);
-            if(announcement==null)hooks.save(next);
+            if(received)hooks.active(request);
+            if(announcement==null)hooks.save(request);
             else{byte[] borrowed=key.clone();try{hooks.saveRotation(publication.saved(next),borrowed);}finally{Crypto.wipe(borrowed);}}
+            durable=true;
             synchronized(sessions){
                 if(operation!=token||state!=State.PERSISTING||sessions.generation()!=generation||!AdminState.sameSnapshot(base,admin.snapshot()))
                     throw new IllegalStateException("Stale persistence before commit");
                 verifyRevocations(candidate);
             }
             persistence.save();committed=true;
-            if(received)hooks.clear(next);
+            if(received)hooks.clear(request);
             final boolean selfRevoked;
             synchronized(sessions){
                 if(received&&(operation!=token||state!=State.PERSISTING||sessions.generation()!=generation))
@@ -220,11 +268,14 @@ public final class CorePersistenceCoordinator {
         }catch(RuntimeException failure){
             synchronized(sessions){
                 if(operation==token){
-                    if(received||committed){state=State.STORAGE_FAILED;sessions.storageFailed();recoveryPages.clear();}
+                    if(received||committed||durable){
+                        state=State.STORAGE_FAILED;stopReason=received?StopReason.STORAGE_FAILED:StopReason.COMMITTED_NOT_APPLIED;
+                        sessions.storageFailed();recoveryPages.clear();
+                    }
                     else state=State.RUNNING;
                 }
             }
-            if(received||committed)hooks.stopped();return false;
+            if(received||committed||durable)hooks.stopped(stopReason());return false;
         }
     }
     /**
@@ -314,29 +365,41 @@ public final class CorePersistenceCoordinator {
             }catch(RuntimeException invalid){Crypto.wipe(next);return KeyResult.REJECTED;}
             state=State.PERSISTING;token=++operation;
         }
+        boolean durable=false;
         try{
             byte[] borrowed=next.clone();
-            try{hooks.saveKey(borrowed,wrap.version());}finally{Crypto.wipe(borrowed);}
+            try{hooks.saveAcceptedKey(prepared.snapshot(),borrowed,wrap.version());}finally{Crypto.wipe(borrowed);}
+            durable=true;
             final AdminState.PreparedPersistence persistence;
             synchronized(sessions){
                 sessions.refresh();
                 if(state!=State.PERSISTING||operation!=token||sessions.isClosed()||sessions.generation()!=expectedGeneration
                         ||sessions.keyVersion()!=expectedVersion||!AdminState.sameSnapshot(base,admin.snapshot())){
-                    if(operation==token)state=State.RUNNING;return KeyResult.STALE;
-                }
-                persistence=admin.preparePersistence(base,prepared);
+                    persistence=null;
+                }else persistence=admin.preparePersistence(base,prepared);
             }
+            if(persistence==null){committedKeyFailure(hooks);return KeyResult.STALE;}
             try(persistence){
                 persistence.save();
+                boolean applied=false;
                 synchronized(sessions){
-                    if(operation!=token||state!=State.PERSISTING||sessions.isClosed()||sessions.generation()!=expectedGeneration){
-                        if(operation==token)state=State.RUNNING;return KeyResult.STALE;
+                    if(operation==token&&state==State.PERSISTING&&!sessions.isClosed()&&sessions.generation()==expectedGeneration){
+                        persistence.publish();state=State.RUNNING;sessions.rotateGroupKey(next,wrap.version());applied=true;
                     }
-                    persistence.publish();state=State.RUNNING;sessions.rotateGroupKey(next,wrap.version());return KeyResult.APPLIED;
                 }
+                if(applied)return KeyResult.APPLIED;
+                committedKeyFailure(hooks);return KeyResult.STALE;
             }
-        }catch(RuntimeException failure){synchronized(sessions){if(operation==token)state=State.RUNNING;}return KeyResult.CANCELLED;}
+        }catch(RuntimeException failure){
+            if(durable)committedKeyFailure(hooks);
+            else synchronized(sessions){if(operation==token)state=State.RUNNING;}
+            return KeyResult.CANCELLED;
+        }
         finally{Crypto.wipe(next);}
+    }
+    private void committedKeyFailure(PersistenceHooks hooks){
+        synchronized(sessions){state=State.STORAGE_FAILED;stopReason=StopReason.COMMITTED_NOT_APPLIED;sessions.storageFailed();recoveryPages.clear();}
+        hooks.stopped(StopReason.COMMITTED_NOT_APPLIED);
     }
     private static List<byte[]> canonical(List<byte[]> subjects){
         if(subjects.size()>AdminRecords.MAX_ENTRIES)throw invalid();var sorted=new TreeSet<byte[]>(AdminRecords::compareBytes);

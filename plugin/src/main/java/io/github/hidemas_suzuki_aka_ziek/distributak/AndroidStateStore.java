@@ -44,7 +44,11 @@ final class AndroidStateStore implements LanRuntime.Storage {
             }
         });
         groups=new GroupStateStorage(envelope,new Target(state),source(state,StateEnvelope.MAX_BYTES),new Target(settings),source(settings,StateSettings.MAX_BYTES),
-                fixed->android.util.Log.i(LanController.TAG,fixed));
+                fixed->android.util.Log.i(LanController.TAG,fixed),new DiskManagementFiles(directory,()->{
+                    try{var descriptor=android.system.Os.open(directory.getPath(),android.system.OsConstants.O_RDONLY,0);
+                        try{android.system.Os.fsync(descriptor);}finally{android.system.Os.close(descriptor);}
+                    }catch(android.system.ErrnoException e){throw new IOException("管理保存先を同期できません",e);}
+                }),new StopMarker(new StopMarker.FileRegion(new File(directory,"stop-marker.bin")),Thread::sleep));
         boolean valid=false,usableState=exists(state)&&!erased;
         if(exists(settings)) {
             try {
@@ -154,6 +158,11 @@ final class AndroidStateStore implements LanRuntime.Storage {
     public void save(LanGroup group)throws Exception {
         if(group.port!=port)throw new SecurityException("ポートの記録が違います");groups.save(group);
     }
+    public io.github.hidemas_suzuki_aka_ziek.distributak.core.CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){return groups.persistenceHooks(group);}
+    public void saveDirectory(LanGroup group,io.github.hidemas_suzuki_aka_ziek.distributak.core.MemberDirectory directory,java.util.Map<String,String> labels)throws Exception{
+        if(group.port!=port)throw new SecurityException("ポートの記録が違います");groups.saveDirectory(group,directory,labels);
+    }
+    public void prepareNetwork(LanGroup group)throws Exception{groups.prepareNetwork(group);}
     public boolean largeState(){return groups.largeState();}
     public boolean saveIssuedRenewal(LanGroup group,byte[] peerId,byte[] certificate)throws Exception {
         if(group.port!=port)throw new SecurityException("ポートの記録が違います");return groups.saveIssuedRenewal(group,peerId,certificate);

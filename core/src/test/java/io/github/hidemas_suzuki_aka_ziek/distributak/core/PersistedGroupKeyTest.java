@@ -49,7 +49,8 @@ class PersistedGroupKeyTest {
         try(var a=f.new Node(1)){
             var c=t.coordinator(a);var r=t.revoked();c.receiveRevocations(r,t.hooks(()->{}));var ann=announcement(a,r,Crypto.blake2s(r.signedBytes()));
             assertEquals(KeyResult.STALE,c.applyGroupKey(ann,wrap(a,ann),a.id,a.secret,0,a.sessions.generation(),keyHooks(()->a.sessions.forgetAllVolatile())));
-            assertEquals(0,a.sessions.keyVersion());assertFalse(a.sessions.isClosed());assertEquals(State.RUNNING,c.state());assertEquals("",c.statusText());
+            assertEquals(0,a.sessions.keyVersion());assertTrue(a.sessions.isClosed());assertEquals(State.STORAGE_FAILED,c.state());
+            assertEquals(StopReason.COMMITTED_NOT_APPLIED,c.stopReason());assertEquals("",c.statusText());
         }
     }
     @Test void keyCommitmentAndWrapAnnouncementBindingAreVerified(){
@@ -75,7 +76,8 @@ class PersistedGroupKeyTest {
             var c=t.coordinator(a);var r=t.revoked();c.receiveRevocations(r,t.hooks(()->{}));var ann=announcement(a,r,Crypto.blake2s(r.signedBytes()));
             var later=AdminRecords.list(AdminRecords.Kind.REVOCATIONS,f.group,2,f.time.millis(),List.of(),f.admin);
             assertEquals(KeyResult.STALE,c.applyGroupKey(ann,wrap(a,ann),a.id,a.secret,0,a.sessions.generation(),keyHooks(()->a.state.acceptRevocations(later))));
-            assertEquals(State.RUNNING,c.state());assertEquals(0,a.sessions.keyVersion());
+            assertEquals(State.STORAGE_FAILED,c.state());assertEquals(StopReason.COMMITTED_NOT_APPLIED,c.stopReason());
+            assertTrue(a.sessions.isClosed());assertEquals("",c.statusText());assertEquals(0,a.sessions.keyVersion());
         }
     }
 }
