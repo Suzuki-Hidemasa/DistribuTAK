@@ -6,11 +6,25 @@ import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 import static io.github.hidemas_suzuki_aka_ziek.distributak.core.AdminRecordsTest.key;
 import static io.github.hidemas_suzuki_aka_ziek.distributak.core.CorePersistenceCoordinator.*;
 
 class CorePersistenceCoordinatorTest {
+    static final class FailingClock extends Clock {
+        final Clock base;
+        boolean fail;
+        FailingClock(Clock base){this.base=base;}
+        public ZoneId getZone(){return base.getZone();}
+        public Clock withZone(ZoneId zone){return this;}
+        public Instant instant(){return Instant.ofEpochMilli(millis());}
+        public long millis(){
+            if(fail){fail=false;throw new DateTimeException("injected clock failure");}
+            return base.millis();
+        }
+    }
     static final class BlockingStore implements AdminRecordStore {
         final InMemoryAdminRecordStore delegate=new InMemoryAdminRecordStore();
         final CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
@@ -39,6 +53,69 @@ class CorePersistenceCoordinatorTest {
         return AdminRecords.list(AdminRecords.Kind.REVOCATIONS,f.group,1,f.time.millis(),List.of(ids),f.admin);
     }
     PersistenceHooks hooks(Runnable during){return new PersistenceHooks(){public void save(AdminRecordStore.Snapshot s){during.run();}};}
+    @Test void noticeClockFailureStopsReceivedPersistenceAndReleasesBothReservations(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            f.connect(a,b);var union=union(a);var clock=new FailingClock(deadlines());
+            var c=new CorePersistenceCoordinator(a.state,a.sessions,union,f.time,clock);clock.fail=true;
+            assertAll(
+                ()->assertFalse(c.receiveRevocations(revoked(b.id),hooks(()->fail("save reached")))),
+                ()->assertEquals(State.STORAGE_FAILED,c.state()),
+                ()->assertTrue(a.sessions.isClosed()),
+                ()->assertTrue(a.state.acceptRevocations(revoked(b.id))),
+                ()->assertTrue(union.add(revoked(b.id)))
+            );
+        }
+    }
+    @Test void saveClockFailureCancelsLocalCandidateAndReleasesBothReservations(){
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var union=union(a);var clock=new FailingClock(deadlines());
+            var c=new CorePersistenceCoordinator(a.state,a.sessions,union,f.time,clock);clock.fail=true;
+            assertFalse(c.persistLocalRevocations(revoked(b.id),hooks(clock::millis)));
+            assertEquals(State.RUNNING,c.state());assertFalse(a.sessions.isClosed());
+            assertEquals(0,a.state.revocations().version());assertFalse(union.contains(b.id));
+            assertTrue(a.state.acceptRevocations(revoked(b.id)));assertTrue(union.add(revoked(b.id)));
+        }
+    }
+    @ParameterizedTest @ValueSource(booleans={false,true})
+    void afterCommitSelfHookFailureKeepsSavedAndMemoryVersionsEqualAndReleasesReservations(boolean local)throws Exception{
+        try(var a=f.new Node(1)){
+            var union=union(a);var c=new CorePersistenceCoordinator(a.state,a.sessions,union,f.time,deadlines());
+            int[] stopped={0};var hooks=new PersistenceHooks(){
+                public void save(AdminRecordStore.Snapshot s){}
+                public void selfRevoked(){throw new IllegalStateException("injected erase failure");}
+                public void stopped(){stopped[0]++;}
+            };
+            assertFalse(local?c.persistLocalRevocations(revoked(a.id),hooks):c.receiveRevocations(revoked(a.id),hooks));
+            var store=(AdminRecordStore)SessionManagerTest.field(a.state,"store");
+            assertEquals(1,store.load().revocationVersion());assertEquals(store.load().revocationVersion(),a.state.revocations().version());
+            assertEquals(State.STORAGE_FAILED,c.state());assertTrue(a.sessions.isClosed());assertEquals(1,stopped[0]);
+            assertTrue(union.add(revoked(key(62))));assertDoesNotThrow(a.state::clear);
+        }
+    }
+    @ParameterizedTest @ValueSource(booleans={false,true})
+    void afterCommitRefreshFailureKeepsSavedAndMemoryVersionsEqualAndReleasesReservations(boolean local){
+        var store=new BlockingStore();
+        try(var a=f.new Node(1);var b=f.new Node(2)){
+            var admin=new AdminState(f.group,Crypto.ed25519Public(f.admin),f.time,store);
+            var admins=a.state.administrators();admin.bootstrap(admins,AdminRecords.signAnchor(admins,f.admin));
+            admin.acceptRevocations(a.state.revocations());boolean[] fail={false};
+            try(var sessions=new SessionManager(admin,a.cert,a.secret,f.psk,0,f.time,()->{
+                if(fail[0]){fail[0]=false;throw new IllegalStateException("injected ticker failure");}
+                return f.time.nanos;
+            },256)){
+                var union=new RevocationUnion(f.group,new AdminStateTrust(admin));union.add(admin.revocations());
+                var c=new CorePersistenceCoordinator(admin,sessions,union,f.time,deadlines());
+                store.beforeSave=()->fail[0]=true;int[] stopped={0};var hooks=new PersistenceHooks(){
+                    public void save(AdminRecordStore.Snapshot s){}
+                    public void stopped(){stopped[0]++;}
+                };
+                assertFalse(local?c.persistLocalRevocations(revoked(b.id),hooks):c.receiveRevocations(revoked(b.id),hooks));
+                assertEquals(1,store.load().revocationVersion());assertEquals(store.load().revocationVersion(),admin.revocations().version());
+                assertEquals(State.STORAGE_FAILED,c.state());assertTrue(sessions.isClosed());assertEquals(1,stopped[0]);
+                assertTrue(union.add(revoked(key(62))));assertDoesNotThrow(admin::clear);
+            }
+        }
+    }
     @Test void oldSessionSurvives179Seconds999MillisAndClosesAt180Seconds(){
         try(var a=f.new Node(1);var b=f.new Node(2)){
             f.connect(a,b);coordinator(a);a.sessions.rotateGroupKey(key(40),1);

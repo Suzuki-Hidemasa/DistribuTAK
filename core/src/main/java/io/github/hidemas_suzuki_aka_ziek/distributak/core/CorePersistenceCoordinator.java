@@ -27,6 +27,11 @@ public final class CorePersistenceCoordinator {
         void save(AdminRecordStore.Snapshot candidate);
         default void clear(AdminRecordStore.Snapshot candidate){}
         default void saveKey(byte[] key,long version){throw new UnsupportedOperationException("Key persistence required");}
+        /**
+         * 停止を通知する。このフックは例外を投げない。
+         * <p>
+         * Reports that communication stopped. This hook must not throw exceptions.
+         */
         default void stopped(){}
         default void selfRevoked(){}
     }
@@ -158,19 +163,21 @@ public final class CorePersistenceCoordinator {
             addition=revocations.prepareAddition(candidate);
             try{persistence=admin.preparePersistence(base,prepared);}catch(RuntimeException failure){addition.close();throw failure;}
             token=++operation;
-            if(received){
-                byte[] encoded=candidate.encode();
-                if(encoded.length<=4*ManagementPage.PAGE_BYTES)for(byte[] subject:candidate.entries()){
-                    var verified=sessions.verifiedSession(subject);
-                    if(verified!=null)notices.put(new DhtId(subject),new Notice(verified.sessionId(),generation,deadlines.millis(),encoded));
-                }
-                addition.commit();
-                sessions.rejectRevokedPeers();
-            }
             state=State.PERSISTING;
         }
         boolean committed=false;
         try(persistence;addition){
+            synchronized(sessions){
+                if(received){
+                    byte[] encoded=candidate.encode();
+                    if(encoded.length<=4*ManagementPage.PAGE_BYTES)for(byte[] subject:candidate.entries()){
+                        var verified=sessions.verifiedSession(subject);
+                        if(verified!=null)notices.put(new DhtId(subject),new Notice(verified.sessionId(),generation,deadlines.millis(),encoded));
+                    }
+                    addition.commit();
+                    sessions.rejectRevokedPeers();
+                }
+            }
             if(received)hooks.active(next);
             hooks.save(next);
             synchronized(sessions){
