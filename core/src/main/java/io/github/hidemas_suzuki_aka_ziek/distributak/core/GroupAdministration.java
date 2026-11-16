@@ -204,7 +204,9 @@ public final class GroupAdministration implements AutoCloseable {
         validateCandidate(candidate);
         var checked=candidate.checked.fork();
         boolean[] saved={false};
-        try{state.applyCandidate(candidate.expected,checked,()->{validateCandidate(candidate);saver.save(candidate.snapshot());saved[0]=true;validateCandidate(candidate);});}
+        try{state.applyCandidate(candidate.expected,checked,()->{validateCandidate(candidate);saver.save(candidate.snapshot());saved[0]=true;
+            // 保存に成功した事実を Preparation に残す。以後 expired()・cancel() は状態を戻さない。 / Record the successful save on the Preparation so expired() and cancel() no longer revert the state.
+            if(candidate.preparation!=null)candidate.preparation.saved=true;validateCandidate(candidate);});}
         catch(RuntimeException failure){if(saved[0])stopped=true;throw failure;}
         candidate.used=true;
         if(state.administrators().hasAdminBindings()){Crypto.wipe(legacyAdministratorIdentity);legacyAdministratorIdentity=null;}
@@ -213,6 +215,8 @@ public final class GroupAdministration implements AutoCloseable {
         expire();
         if(administratorSecret!=null&&!state.administrators().hasEntry(Crypto.ed25519Public(administratorSecret))){Crypto.wipe(administratorSecret);administratorSecret=null;directory.clear();}
         try{publisher.publish(candidate);}catch(RuntimeException failure){stopped=true;throw failure;}
+        // 公開まで成功したら Preparation を完了にする（publish 経由でも直接でも同じ）。 / After a successful publish, complete the Preparation (same via publish or directly).
+        if(candidate.preparation!=null)candidate.preparation.completed();
     }
     private void validateCandidate(Candidate candidate) {
         if(candidate.preparation!=null)candidate.preparation.beforeCommit();
@@ -319,6 +323,8 @@ public final class GroupAdministration implements AutoCloseable {
         private final Map<String,byte[]> peers=new HashMap<>();private final Set<String> confirmed=new HashSet<>();
         private final ProofRequests requests=new ProofRequests(random,nanos);
         private Phase phase=Phase.PREPARE;private long confirmBegan;
+        // 保存に成功したら true。以後は期限切れ・取り消しで状態を戻さない（04 §4.5、DTAK-8）。 / True once the save succeeded; expiry and cancel never revert the state afterwards (04 §4.5, DTAK-8).
+        private boolean saved;
         private Preparation(SessionManager sessions,List<byte[]> keys,boolean unknown,boolean invitation) {
             this.sessions=Objects.requireNonNull(sessions);this.invitation=invitation;this.unknown=unknown;baseline=bindingStamp();
             for(byte[] key:keys){Crypto.length(key,32);if(removed.stream().anyMatch(k->Crypto.equal(k,key)))throw invalid();removed.add(key.clone());}
@@ -411,7 +417,7 @@ public final class GroupAdministration implements AutoCloseable {
         }
         public boolean expired() {
             synchronized(GroupAdministration.this) {
-                if(phase==Phase.COMPLETE||phase==Phase.PUBLISH)return false;
+                if(saved||phase==Phase.COMPLETE||phase==Phase.PUBLISH)return false;
                 long now=nanos.getAsLong();boolean expired=phase!=Phase.PREPARE&&(now<confirmBegan||now-confirmBegan>=ProofRequests.TIMEOUT_NANOS);
                 if(expired){phase=Phase.CANCELLED;requests.close();}return expired;
             }
@@ -442,10 +448,13 @@ public final class GroupAdministration implements AutoCloseable {
         public void publish(Candidate candidate,Saver saver,Publisher publisher) {
             synchronized(GroupAdministration.this) {
                 unchanged();if(phase!=Phase.COMMIT||candidate.owner!=GroupAdministration.this)throw invalid();
-                persist(candidate,saver,publisher);phase=Phase.PUBLISH;requests.close();phase=Phase.COMPLETE;
+                // 保存の印と COMPLETE への移行は persist が行う。直接 persist に渡しても同じ結果になる。 / persist sets the saved mark and moves to COMPLETE, so a direct persist call gives the same result.
+                persist(candidate,saver,publisher);
             }
         }
-        public void cancel(){synchronized(GroupAdministration.this){if(phase==Phase.COMPLETE||phase==Phase.PUBLISH)return;phase=Phase.CANCELLED;requests.close();provenRequests.clear();}}
+        // persist が保存と公開に成功したあとに呼ぶ。persist の同期の中で呼ばれる。 / Called by persist after save and publish succeeded, inside persist's synchronization.
+        private void completed(){phase=Phase.COMPLETE;requests.close();}
+        public void cancel(){synchronized(GroupAdministration.this){if(saved||phase==Phase.COMPLETE||phase==Phase.PUBLISH)return;phase=Phase.CANCELLED;requests.close();provenRequests.clear();}}
         @Override public String toString(){return "Administration preparation";}
     }
     private byte[] bindingStamp() {
