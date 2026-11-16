@@ -157,6 +157,9 @@ public final class ManagedDhtRecord {
         if(expected==null)return;
         var inner=AdminRecords.decode(body.inner);
         if(inner.kind()!=expected||!Crypto.equal(inner.group(),body.group)||inner.version()!=body.version)throw rejected();
+        // 形式 1 は使わない（DTAK-9）。一覧は形式 2 だけ。鍵を包んだ記録には形式 2 がなく、そのまま扱う。
+        // Format 1 is not used (DTAK-9). Lists must be format 2; the wrapped-key record has no format 2 and is taken as is.
+        if(expected!=AdminRecords.Kind.WRAPPED_KEY&&inner.format()!=2)throw rejected();
         if(body.kind==DhtKeys.WRAPPED_KEY&&!Crypto.equal(inner.field(0),body.subject))throw rejected();
         decodedInner=inner;
     }

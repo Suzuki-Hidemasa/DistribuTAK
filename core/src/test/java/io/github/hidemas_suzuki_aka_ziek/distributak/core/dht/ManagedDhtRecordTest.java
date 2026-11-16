@@ -277,4 +277,29 @@ class ManagedDhtRecordTest {
         byte[] tooBig=new byte[DhtWire.MAX_TRANSFER_BYTES+1];
         reject(()->verify(tooBig));
     }
+    /**
+     * 形式 1 の一覧（項目 15・16 がなく、用途の接頭辞なしで署名したもの）を作る。
+     * <p>
+     * Builds a format-1 list: no items 15 and 16, signed without the purpose prefix.
+     */
+    static AdminRecords.Record formatOneList(AdminRecords.Record original) {
+        byte[] payload=wire(out->{
+            out.writeUInt32(1,original.kind().ordinal()+1);out.writeByteArray(2,original.group());out.writeByteArray(3,original.signer());
+            out.writeUInt64(4,original.version());out.writeUInt64(5,original.signedAt());
+            for(byte[] entry:original.entries())out.writeByteArray(6,entry);
+        });
+        return AdminRecords.decode(envelope(payload,Crypto.sign(secret(1),payload)));
+    }
+    /** 形式 1 は使わない。内側が形式 1 の一覧は、外側の署名が正しくても断る（DTAK-9）。 / Format 1 is not used: an inner format-1 list is refused even with a valid outer signature. */
+    @Test void innerFormatOneListsAreRefused() {
+        var oldAdmins=formatOneList(admins(3,NOW,1,2));
+        assertEquals(1,oldAdmins.format());
+        reject(()->verify(ManagedDhtRecord.issue(DhtKeys.LATEST_ADMINS,GROUP,secret(1),oldAdmins,1,3,digest(5),NOW,null).encode()));
+        reject(()->verify(ManagedDhtRecord.issue(DhtKeys.ADMIN_HISTORY,GROUP,secret(1),oldAdmins,1,3,digest(5),NOW,null).encode()));
+        var oldRevocations=formatOneList(revocations(2,NOW,1));
+        assertEquals(1,oldRevocations.format());
+        reject(()->verify(ManagedDhtRecord.issue(DhtKeys.LATEST_REVOCATIONS,GROUP,secret(1),oldRevocations,1,3,digest(5),NOW,null).encode()));
+        // 形式 2 は通る。 / Format 2 passes.
+        verify(ManagedDhtRecord.issue(DhtKeys.LATEST_ADMINS,GROUP,secret(1),admins(3,NOW,1,2),1,3,digest(5),NOW,null).encode());
+    }
 }
