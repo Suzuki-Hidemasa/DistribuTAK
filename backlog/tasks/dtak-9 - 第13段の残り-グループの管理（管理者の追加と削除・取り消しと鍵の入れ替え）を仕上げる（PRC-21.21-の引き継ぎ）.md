@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 00:24'
-updated_date: '2026-11-16 10:14'
+updated_date: '2026-11-16 10:17'
 labels:
   - stage-13
 dependencies: []
@@ -65,4 +65,6 @@ PRC-163 のタスク PRC-21.21（ADR 0030 答え 167 の第13段）の未了の�
 第6a回の追記（2026-11-16）: 保存中の予約で、管理者の追加・削除、失効の受理、clear、読み戻しが IllegalStateException で断られる（docs/04 §4.5 に書いた）。調整層はまだ製品に配線されておらず、今の本番の呼び出し元（LanGroup の消去、ManagedVerifier の読み取り）は影響を受けない。第8回の配線で、保存中の消去・管理操作が断られることを扱う（宿題）。この直し（c096b72..33080d6）は、二者の再レビュー（観点: 予約中に断られる呼び出し・保存確定後の失敗・予約の解放漏れ）に出した。結果は次の追記に書く。
 
 第6a回の再レビュー（Astra・Fable 5.2、c096b72..33080d6）: 必修0・推奨2・軽微1、合意できなかった点なし。S1（予約のあと try の前の例外で予約が残る）を直し、S2（保存確定後の失敗の試験4件）と L1（stopped は例外を投げないと Javadoc に明記）を足した。核 1,486 件、失敗・スキップ 0、NewApi 0。持ち越し（第8回の配線）: 予約中に LanGroup.close() の state.clear() が例外になる件、予約の IllegalStateException を既存の catch が握らないかの確認、UdpEndpoint の受理が例外をそのまま出す件。第7回: PersistenceHooks.save が何を保存するか（U1 に関連する別の確認点）。
+
+6e6b842 の確認: S1 の直しで persist のロックが PERSISTING への移行と通知・R 確定の間で一度離れるが、その間も PERSISTING のため permits・requireData が通信と操作をすべて断り、世代を変える鍵の適用は RUNNING からしか始まらない。失効した相手が通る道・古い前提の commit はない（自分で読んで確認。二者のレビューは通していない）。プラグイン 416 件・lint も今回の変更のあとで成功。
 <!-- SECTION:NOTES:END -->
