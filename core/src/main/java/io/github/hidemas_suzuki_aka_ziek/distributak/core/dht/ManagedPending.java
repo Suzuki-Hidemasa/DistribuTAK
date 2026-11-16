@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * 依存本体を待つ管理記録の有限な保留枠（04 §4.5）。満杯なら新着を断り、再送で期限を延ばさない。
@@ -20,7 +21,7 @@ import java.util.function.Consumer;
 public final class ManagedPending {
     public static final int MAX_COUNT=8,MAX_BYTES=4*1024*1024;
     public static final long MAX_AGE_MILLIS=120_000;
-    private record Entry(ManagedDhtRecord record,byte[] encoded,byte[] memberId,long started){}
+    private record Entry(ManagedDhtRecord record,byte[] encoded,byte[] memberId,byte[] owner,int qualifiedSigners,long started){}
     /**
      * 再検査した結果。保留のままの記録は含めない。
      * <p>
@@ -28,10 +29,22 @@ public final class ManagedPending {
      */
     public record Checked(ManagedDhtRecord record,ManagedVerdict verdict){}
     private final Clock clock;
+    private final ManagedVerifier authority;
+    private final Predicate<byte[]> qualifiedSender;
     private final List<Entry> entries=new ArrayList<>();
     private int bytes;
     private boolean retrying;
-    public ManagedPending(Clock clock){this.clock=Objects.requireNonNull(clock);}
+    public ManagedPending(Clock clock){this(clock,null,null);}
+    /**
+     * 現在の送り手と署名者の資格に基づいて保留枠を分ける。
+     * <p>
+     * Partitions pending slots using current transport-sender and signer qualifications.
+     */
+    public ManagedPending(Clock clock,ManagedVerifier authority,Predicate<byte[]> qualifiedSender){
+        this.clock=Objects.requireNonNull(clock);
+        if((authority==null)!=(qualifiedSender==null))throw new IllegalArgumentException("incomplete pending authority");
+        this.authority=authority;this.qualifiedSender=qualifiedSender;
+    }
     private static boolean pending(ManagedVerdict verdict){
         return verdict.status()==ManagedVerdict.Status.NEEDS_VERSION||verdict.status()==ManagedVerdict.Status.NEEDS_ANNOUNCEMENT;
     }
@@ -67,8 +80,12 @@ public final class ManagedPending {
         if(authenticatedMember!=null&&authenticatedMember.length!=32)return false;
         byte[] encoded=record.encode();
         for(var entry:entries)if(Arrays.equals(entry.encoded,encoded)&&Arrays.equals(entry.memberId,authenticatedMember))return true;
-        if(entries.size()>=MAX_COUNT||encoded.length>MAX_BYTES-bytes)return false;
-        entries.add(new Entry(record,encoded,authenticatedMember==null?null:authenticatedMember.clone(),clock.millis()));
+        int signers=authority==null?3:authority.pendingSignerQualifications(record);
+        byte[] owner=authenticatedMember!=null&&signers==3&&(qualifiedSender==null||qualifiedSender.test(authenticatedMember.clone()))
+                ?authenticatedMember.clone():null;
+        long owned=entries.stream().filter(entry->Arrays.equals(entry.owner,owner)).count();
+        if(owned>=2||entries.size()>=MAX_COUNT||encoded.length>MAX_BYTES-bytes)return false;
+        entries.add(new Entry(record,encoded,authenticatedMember==null?null:authenticatedMember.clone(),owner,signers,clock.millis()));
         bytes+=encoded.length;return true;
     }
     /**
@@ -102,6 +119,17 @@ public final class ManagedPending {
                 for(var entry:ordered){
                     expire();
                     if(!entries.contains(entry))continue;
+                    if(authority!=null){
+                        int currentSigners=authority.pendingSignerQualifications(entry.record);
+                        if((entry.memberId!=null&&!qualifiedSender.test(entry.memberId.clone()))||(entry.qualifiedSigners&~currentSigners)!=0){
+                            if(remove(entry))resolved.add(new Checked(entry.record,ManagedVerdict.INVALID));
+                            continue;
+                        }
+                        if((entry.qualifiedSigners|currentSigners)!=entry.qualifiedSigners){
+                            var learned=new Entry(entry.record,entry.encoded,entry.memberId,entry.owner,entry.qualifiedSigners|currentSigners,entry.started);
+                            entries.set(entries.indexOf(entry),learned);entry=learned;
+                        }
+                    }
                     var current=held.apply(entry.record.key());
                     var verdict=entry.memberId==null?verifier.judge(entry.record,current):verifier.judgeStore(entry.record,current,entry.memberId);
                     if(!pending(verdict)&&remove(entry)){

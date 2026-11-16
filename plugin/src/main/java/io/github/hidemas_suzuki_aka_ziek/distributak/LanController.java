@@ -212,7 +212,7 @@ final class LanController implements AutoCloseable {
                 var state=coordinator.state();
                 if(state==CorePersistenceCoordinator.State.STORAGE_FAILED)return;
                 if(state==CorePersistenceCoordinator.State.PERSISTING){
-                    try{if(ManagementPage.decodeEnvelope(plain).kind()!=ManagementPage.Kind.REVOCATION)return;}
+                    try{ManagementPage.decodeEnvelope(plain);}
                     catch(IllegalArgumentException invalid){return;}
                 }
             }
@@ -233,6 +233,12 @@ final class LanController implements AutoCloseable {
                     byte[] current=endpoint.sessionId(packet.peer);
                     try{if(current==null||!Crypto.equal(current,packet.session))continue;}
                     finally{Crypto.wipe(current);}
+                    if(roster!=null&&roster.receive(packet.peer,packet.session,packet.wire,packet.receivedAt)){
+                        if(persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
+                            storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
+                        }
+                        continue;
+                    }
                     if(recovery!=null&&recovery.receive(packet.peer,packet.session,packet.wire,packet.receivedAt)){
                         if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
                             storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
@@ -289,6 +295,7 @@ final class LanController implements AutoCloseable {
     private volatile CorePersistenceCoordinator persistence;
     private volatile Clock managementClock;
     private RevocationRecovery recovery;
+    private RosterExchange roster;
     private SessionManager managedSessions;
     private boolean recoveringNetwork;
     private interface SavedAction<T>{T run()throws Exception;}
@@ -330,6 +337,7 @@ final class LanController implements AutoCloseable {
                 public void start(byte[] peer){next.start(peer);}
                 public void rejected(ManagementPageSender.Offer result){reject++;}
             });
+            roster=new RosterExchange(group,managed,persistence,managementClock,store,recovery);
             if(!limited)startDht(next,managed,selected,epoch);
             else message="保存がいっぱい";
             if(group.peerCertificate!=null){next.expectPeerCertificate(group.peerCertificate);next.setPeerAddress(Crypto.blake2s(group.peerCertificate.field(0)),group.peerAddress);}
@@ -662,6 +670,13 @@ final class LanController implements AutoCloseable {
                     byte[] id=Crypto.blake2s(known.certificate().field(0));
                     if(candidates.stream().noneMatch(value->Arrays.equals(value,id)))candidates.add(id);
                 }
+                if(roster!=null&&persistence.permits(CorePersistenceCoordinator.Operation.ROSTER)){
+                    for(var candidate:candidates)roster.registerFirst(candidate);
+                    if(persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
+                        storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();publish();return;
+                    }
+                    roster.poll(candidates);
+                }
                 recovery.poll(candidates);finishRecovery();
                 if(endpoint==null)return;
             }
@@ -718,16 +733,23 @@ final class LanController implements AutoCloseable {
         // 旧項目8は消費して捨てる。形式2の更新には専用の入口だけを使う。
         try{return SyncWire.renewalCertificate(wire)!=null;}catch(RuntimeException malformed){return false;}
     }
+    private <T> T renewalCandidate(java.util.function.Supplier<T> action){
+        if(persistence==null)return action.get();
+        Object[] value={null};persistence.execute(CorePersistenceCoordinator.Operation.RENEWAL,()->value[0]=action.get());
+        @SuppressWarnings("unchecked") T result=(T)value[0];return result;
+    }
     private boolean applyRenewal(AdminRecords.Record certificate) {
         try {
-            if(endpoint.validateLocalCertificateRenewal(certificate)){
-                saving(()->store.saveLocalRenewal(group,certificate));endpoint.updateLocalCertificate(certificate);
+            if(renewalCandidate(()->endpoint.validateLocalCertificateRenewal(certificate))){
+                saving(()->store.saveLocalRenewal(group,certificate));
+                renewalCandidate(()->{endpoint.updateLocalCertificate(certificate);return null;});
             }
             return true;
         }catch(Exception failure){log("LAN_RENEWAL_REJECTED");return false;}
     }
     private static String renewalPeer(byte[] peer){return java.util.Base64.getEncoder().encodeToString(peer);}
     private void receiveProofRenewal(byte[] peer,byte[] session,byte[] wire) {
+        if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.RENEWAL))return;
         try {
             var message=RenewalMessage.decode(wire);
             if(message.operation()==RenewalMessage.Operation.PROOF_REPLY){receiveProofReply(peer,session,message);return;}
@@ -749,7 +771,7 @@ final class LanController implements AutoCloseable {
             if(message.operation()==RenewalMessage.Operation.PROOF_REQUEST) {
                 if(message.reason()==RenewalMessage.Reason.AUTO_RENEWAL&&group.certificate.identityProofFormat()==2)
                     throw new SecurityException("本人証明はすでに形式2です");
-                if(!proofRequests.remember(peer,session,message))return;
+                if(!renewalCandidate(()->proofRequests.remember(peer,session,message)))return;
                 endpoint.sendIfSession(peer,session,RenewalMessage.reply(message,group.identitySecret).encode());return;
             }
             if(group.certificate.identityProofFormat()!=2&&proofRequests.match(peer,session,message)==null)
@@ -765,7 +787,7 @@ final class LanController implements AutoCloseable {
     private void receiveProofReply(byte[] peer,byte[] session,RenewalMessage reply)throws Exception {
         if(!group.isAdministrator()||group.peerCertificate==null||!Crypto.equal(peer,Crypto.blake2s(group.peerCertificate.field(0))))
             throw new SecurityException("求めた相手が違います");
-        var request=proofRequests.match(peer,session,reply);
+        var request=renewalCandidate(()->proofRequests.match(peer,session,reply));
         if(request==null||!request.matchesBase(group.peerCertificate)||!Crypto.equal(reply.identity(),group.peerCertificate.field(0))
                 ||!SignaturePurpose.verifyIdentity(group.groupId,reply.identity(),reply.handshake(),reply.proof()))
             throw new SecurityException("未完の証明要求と違います");
@@ -776,7 +798,7 @@ final class LanController implements AutoCloseable {
                 certificate=AdminRecords.decode(LanGroup.renewalCertificate(pending));
                 if(certificate.format()!=2||!Crypto.equal(certificate.field(2),reply.proof()))throw new SecurityException("保存した本人証明が違います");
                 group.state.verifyCertificate(certificate,group.peerCertificate.field(1));
-            }else certificate=group.state.issueCertificateRenewal(group.peerCertificate,reply.proof(),group.administratorSecret,reply.reason(),reply.managementOperation());
+            }else certificate=renewalCandidate(()->group.state.issueCertificateRenewal(group.peerCertificate,reply.proof(),group.administratorSecret,reply.reason(),reply.managementOperation()));
             publishDelivery(peer,session,RenewalMessage.delivery(request,certificate.encode()));
         }finally{Crypto.wipe(pending);}
     }
@@ -784,11 +806,14 @@ final class LanController implements AutoCloseable {
         byte[] wire=delivery.encode(),pending=delivery.pendingValue();
         try {
             saving(()->store.saveIssuedRenewal(group,peer,pending));
-            byte[] previous=deliverySessions.put(renewalPeer(peer),session.clone());Crypto.wipe(previous);
-            endpoint.sendIfSession(peer,session,wire);
+            renewalCandidate(()->{
+                byte[] previous=deliverySessions.put(renewalPeer(peer),session.clone());Crypto.wipe(previous);
+                endpoint.sendIfSession(peer,session,wire);return null;
+            });
         }finally{Crypto.wipe(wire);Crypto.wipe(pending);}
     }
     private void renewPeer() {
+        if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.RENEWAL))return;
         long now=runtime.nanos.getAsLong();
         if(!group.isAdministrator())return;
         if(!ownRenewalChecked||now>=lastOwnRenewalCheck&&now-lastOwnRenewalCheck>=3_600_000_000_000L){
@@ -808,7 +833,7 @@ final class LanController implements AutoCloseable {
             if(pending!=null&&Crypto.equal(session,deliverySessions.get(renewalPeer(peer)))) {
                 endpoint.sendIfSession(peer,session,RenewalMessage.pendingValue(pending).encode());return;
             }
-            var request=proofRequests.begin(peer,session,group.peerCertificate,Crypto.ed25519Public(group.administratorSecret),RenewalMessage.Reason.AUTO_RENEWAL,null);
+            var request=renewalCandidate(()->proofRequests.begin(peer,session,group.peerCertificate,Crypto.ed25519Public(group.administratorSecret),RenewalMessage.Reason.AUTO_RENEWAL,null));
             if(request==null)return;
             if(group.peerCertificate.identityProofFormat()!=2){endpoint.sendIfSession(peer,session,request.encode());return;}
             var certificate=pending==null?group.state.issueCertificateRenewal(group.peerCertificate,group.peerCertificate.field(2),group.administratorSecret,
@@ -884,7 +909,7 @@ final class LanController implements AutoCloseable {
     }
     private void stopNetwork(){
         if(recovery!=null){recovery.close();recovery=null;}
-        managedSessions=null;recoveringNetwork=false;
+        if(roster!=null){roster.close();roster=null;}managedSessions=null;recoveringNetwork=false;
         persistence=null;managementClock=null;joining=false;proofRequests.close();
         for(var entry:memberFirst.values())Crypto.wipe(entry.session);memberFirst.clear();
         for(byte[] session:deliverySessions.values())Crypto.wipe(session);deliverySessions.clear();

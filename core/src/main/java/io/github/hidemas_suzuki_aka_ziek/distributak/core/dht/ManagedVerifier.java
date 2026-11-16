@@ -131,6 +131,19 @@ public final class ManagedVerifier {
         return rank(candidate,inner,held);
     }
 
+    /**
+     * 保留枠の分類用に内外の署名者の現在資格を調べる。記録の受理は行わない。
+     * <p>
+     * Checks current inner and outer signer qualifications for pending-slot classification without accepting a record.
+     */
+    int pendingSignerQualifications(ManagedDhtRecord record) {
+        try{
+            var latest=trust.latest();
+            byte[] innerSigner=record.kind()==DhtKeys.KEY_ANNOUNCEMENT?record.announcement().signer():record.inner().signer();
+            return (latest.hasEntry(record.signer())?1:0)|(latest.hasEntry(innerSigner)?2:0);
+        }catch(RuntimeException invalid){return 0;}
+    }
+
     private static boolean boundTo(AdminRecords.Record list,byte[] signer,byte[] memberId) {
         var binding=list.binding(signer);
         return binding!=null&&binding.state()==AdminBinding.State.BOUND&&Crypto.equal(binding.memberId(),memberId);

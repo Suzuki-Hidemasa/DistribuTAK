@@ -78,16 +78,20 @@ final class LanControllerHarness implements AutoCloseable {
         VersionSixStorageTest.Files managementFiles;
         StopMarkerTest.Disk stopMarker;
         void enableSix(){managementFiles=new VersionSixStorageTest.Files();stopMarker=new StopMarkerTest.Disk();}
-        GroupStateStorage managedStorage(){return managementFiles==null?groupStorage():new GroupStateStorage(envelope,state,source(state),settings,settings,v->{},managementFiles,stopMarker.marker());}
+        GroupStateStorage managedStorage(){state.fail=failSave;return managementFiles==null?groupStorage():new GroupStateStorage(envelope,state,source(state),settings,settings,v->{},managementFiles,stopMarker.marker());}
         public void prepareNetwork(LanGroup group)throws Exception{managedStorage().prepareNetwork(group);}
         public CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){return managedStorage().persistenceHooks(group);}
         public LanGroup load(Clock clock)throws Exception {if(loadFailure!=null)throw loadFailure;return erased?null:managedStorage().load(loadClock==null?clock:loadClock);}
         public void save(LanGroup group)throws Exception {managedStorage().save(group);}
+        int directorySaves;Runnable afterDirectory=()->{};
+        public void saveDirectory(LanGroup group,MemberDirectory directory,Map<String,String> labels)throws Exception{
+            if(managementFiles==null)enableSix();directorySaves++;managedStorage().saveDirectory(group,directory,labels);afterDirectory.run();
+        }
         public boolean largeState(){return state.value!=null&&state.value.length>512*1024;}
         boolean failLocalRenewal,failIssuedRenewal;
-        public boolean saveLocalRenewal(LanGroup group,AdminRecords.Record certificate)throws Exception{if(failLocalRenewal)throw new java.io.IOException("test save failure");return groupStorage().saveLocalRenewal(group,certificate);}
-        public boolean saveIssuedRenewal(LanGroup group,byte[] id,byte[] certificate)throws Exception{if(failIssuedRenewal)throw new java.io.IOException("test save failure");return groupStorage().saveIssuedRenewal(group,id,certificate);}
-        public boolean savePeer(LanGroup group,AdminRecords.Record certificate,InetSocketAddress address)throws Exception{return groupStorage().savePeer(group,certificate,address);}
+        public boolean saveLocalRenewal(LanGroup group,AdminRecords.Record certificate)throws Exception{if(failLocalRenewal)throw new java.io.IOException("test save failure");return managedStorage().saveLocalRenewal(group,certificate);}
+        public boolean saveIssuedRenewal(LanGroup group,byte[] id,byte[] certificate)throws Exception{if(failIssuedRenewal)throw new java.io.IOException("test save failure");return managedStorage().saveIssuedRenewal(group,id,certificate);}
+        public boolean savePeer(LanGroup group,AdminRecords.Record certificate,InetSocketAddress address)throws Exception{return managedStorage().savePeer(group,certificate,address);}
         public void acceptRejoined(Future<?> future,LanGroup previous,LanGroup candidate,LanRuntime.Pending pending)throws Exception{groupStorage().acceptRejoined(previous,candidate,future,pending);}
         private SyncStateStorage syncStorage(){return new SyncStateStorage(envelope,sync,new SyncStateStorage.Source(){
             public boolean exists(){return sync.value!=null;}

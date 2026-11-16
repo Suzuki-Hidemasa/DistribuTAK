@@ -26,14 +26,16 @@ public final class ManagementPageAssembler {
      * A complete unverified object, without implying valid signatures or authority.
      */
     public static final class Completed implements AutoCloseable {
-        private final ManagementPage first;private final byte[] data;
-        private Completed(Assembly assembly){first=assembly.first;data=assembly.buffer;}
+        private final ManagementPage first;private final byte[] data;private final long began;
+        private Completed(Assembly assembly){first=assembly.first;data=assembly.buffer;began=assembly.started;}
+        private Completed(ManagementPage first,byte[] data,long began){this.first=first;this.data=data;this.began=began;}
         public ManagementPage.Kind kind(){return first.kind();}
         public byte[] data(){return data.clone();}
         public byte[] group(){return first.group();}
         public byte[] operationId(){return first.operationId();}
         public byte[] objectDigest(){return first.objectDigest();}
         public int totalEntries(){return first.totalEntries();}
+        public long began(){return began;}
         @Override public void close(){Crypto.wipe(data);}
         @Override public String toString(){return "Complete unverified management object";}
     }
@@ -45,13 +47,36 @@ public final class ManagementPageAssembler {
     public record Result(Status status,Completed completed,ManagementPageAck ack){
         public Result(Status status,Completed completed){this(status,completed,null);}
     }
+    /**
+     * 完了記録内だけの名簿ACK再投入情報。本体を保持せず、元の期限を保つ。
+     * <p>
+     * Roster ACK retry metadata held only in completion records, retaining no body and preserving original deadlines.
+     */
+    public record RosterAckRetry(byte[] peer,byte[] session,long generation,ManagementPageAck ack,long received,long began){
+        public RosterAckRetry(byte[] peer,byte[] session,long generation,ManagementPageAck ack,long received,long began){
+            this.peer=peer.clone();this.session=session.clone();this.generation=generation;this.ack=ack;this.received=received;this.began=began;
+        }
+        @Override public byte[] peer(){return peer.clone();}
+        @Override public byte[] session(){return session.clone();}
+        @Override public String toString(){return "Roster ACK retry";}
+    }
     private static final class Remembered implements AutoCloseable {
         final DhtId peer;final ManagementPage first;final byte[] session;final long generation;
+        final byte[][] rosterPages;
+        final long began;RosterAckRetry retry;
+        byte[] summaryBody;long summaryReceived;
         long at;boolean confirmed;
         Remembered(DhtId peer,Assembly assembly,long now){
-            this.peer=peer;first=assembly.first;session=assembly.session.clone();generation=assembly.generation;at=now;
+            this.peer=peer;first=assembly.first;session=assembly.session.clone();generation=assembly.generation;at=now;began=assembly.started;
+            if(first.kind()==ManagementPage.Kind.ROSTER){
+                rosterPages=new byte[assembly.have.length][];
+                for(int i=0;i<rosterPages.length;i++)if(assembly.have[i])rosterPages[i]=digestAndWipe(Arrays.copyOfRange(assembly.buffer,
+                        i*ManagementPage.PAGE_BYTES,Math.min(assembly.buffer.length,(i+1)*ManagementPage.PAGE_BYTES)),Crypto::blake2s);
+            }else rosterPages=null;
         }
-        public void close(){Crypto.wipe(session);}
+        void clearRetry(){if(retry!=null){Crypto.wipe(retry.peer);Crypto.wipe(retry.session);retry=null;}}
+        void clearSummary(){Crypto.wipe(summaryBody);summaryBody=null;}
+        public void close(){clearSummary();clearRetry();Crypto.wipe(session);}
         boolean matches(DhtId peer,ManagementPage page,byte[] session,long generation){
             return this.peer.equals(peer)&&metadata(first,page)&&this.generation==generation&&Arrays.equals(this.session,session);
         }
@@ -59,6 +84,14 @@ public final class ManagementPageAssembler {
     private static ManagementPage metadataOnly(ManagementPage page){
         return new ManagementPage(page.kind(),page.operationId(),page.group(),page.objectDigest(),page.totalBytes(),page.pageIndex(),page.pageCount(),
                 new byte[Math.min(ManagementPage.PAGE_BYTES,page.totalBytes()-page.pageIndex()*ManagementPage.PAGE_BYTES)],page.totalEntries());
+    }
+    /**
+     * 一時の平文の写しは、照合の計算が失敗しても消す。
+     * <p>
+     * Wipes a temporary plaintext copy even when digest calculation fails.
+     */
+    static byte[] digestAndWipe(byte[] copy,java.util.function.Function<byte[],byte[]> digest){
+        try{return digest.apply(copy);}finally{Crypto.wipe(copy);}
     }
     private static boolean sameTarget(ManagementPage first,ManagementPage page){
         return first.kind()==page.kind()&&Arrays.equals(first.operationId(),page.operationId())&&Arrays.equals(first.objectDigest(),page.objectDigest());
@@ -133,8 +166,18 @@ public final class ManagementPageAssembler {
         if(!Arrays.equals(group,page.group())||!page.withinKindLimits())return result(Status.REJECTED);
         var key=new DhtId(peer);var assembly=assemblies.get(key);long now=clock.millis();
         if(receivedAt>now||now-receivedAt>=PROGRESS_MILLIS)return result(Status.REJECTED);
-        for(var record:completed)if(record.matches(key,page,session,generation))
+        for(var record:completed)if(record.matches(key,page,session,generation)){
+            if(record.summaryBody!=null){
+                byte[] copy=page.data();
+                try{int offset=page.pageIndex()*ManagementPage.PAGE_BYTES;
+                    for(int i=0;i<copy.length;i++)if(copy[i]!=record.summaryBody[offset+i])return result(Status.REJECTED);
+                }finally{Crypto.wipe(copy);}
+                return new Result(Status.COMPLETE,new Completed(record.first,record.summaryBody.clone(),record.began));
+            }
             return !requireConfirmation||record.confirmed?acknowledged(Status.DUPLICATE,null,page,true):result(Status.DUPLICATE);
+        }
+        if(page.kind()==ManagementPage.Kind.ROSTER_SUMMARY&&completed.stream().anyMatch(r->r.peer.equals(key)&&r.summaryBody!=null))
+            return result(Status.REJECTED);
         if(retired.stream().anyMatch(r->r.matches(key,page,session,generation)))return result(Status.REJECTED);
         if(assembly!=null&&!assembly.matches(page,session,generation)){
             if(page.pageIndex()!=0||assembly.generation!=generation||!Arrays.equals(assembly.session,session)||sameTarget(assembly.first,page))
@@ -174,10 +217,121 @@ public final class ManagementPageAssembler {
     public synchronized ManagementPageAck confirm(byte[] peer,byte[] session,long generation,ManagementPage page){
         poll();var key=new DhtId(peer);
         for(var record:completed)if(record.matches(key,page,session,generation)){
-            record.confirmed=true;return acknowledged(Status.DUPLICATE,null,page,true).ack();
+            record.confirmed=true;record.clearSummary();return acknowledged(Status.DUPLICATE,null,page,true).ack();
         }
         return null;
     }
+    /**
+     * 元の期限を検査してから公開し、公開が成功した対象だけを確定する。名簿の保存後公開に使う。
+     * <p>
+     * Checks original deadlines before publication and confirms only successfully published objects, for post-save roster publication.
+     */
+    public synchronized ManagementPageAck confirmAfter(byte[] peer,byte[] session,long generation,ManagementPage page,Runnable publish){
+        poll();var key=new DhtId(peer);
+        for(var record:completed)if(record.matches(key,page,session,generation)){
+            publish.run();record.confirmed=true;record.clearSummary();return acknowledged(Status.DUPLICATE,null,page,true).ack();
+        }
+        return null;
+    }
+    /**
+     * 応答の送信待ちが満杯なら、未確定の完了記録にsummary本体を元の期限内だけ保持する。
+     * <p>
+     * Retains a summary body within original deadlines in its unconfirmed completion record when response sending is full.
+     */
+    public synchronized void retryRosterSummary(byte[] peer,byte[] session,long generation,ManagementPage page,byte[] body,long receivedAt){
+        if(page.kind()!=ManagementPage.Kind.ROSTER_SUMMARY)return;
+        if(body==null||body.length!=page.totalBytes()||body.length>RosterMessage.MAX_BYTES)throw new IllegalArgumentException("Invalid summary body");
+        poll();var key=new DhtId(peer);
+        for(var record:completed)if(!record.confirmed&&record.matches(key,page,session,generation)){
+            if(record.summaryBody==null){record.summaryBody=body.clone();record.summaryReceived=receivedAt;}return;
+        }
+    }
+    /**
+     * 保留summaryの束縛と権限を呼出側で再検査する。
+     * <p>
+     * Lets the caller recheck bindings and authority for pending summaries.
+     */
+    @FunctionalInterface public interface RosterCurrent {boolean test(byte[] peer,byte[] session,long generation);}
+    /**
+     * 束縛や権限を失った保留本体だけを消し、別対象の組立を変えない。
+     * <p>
+     * Wipes pending bodies that lost binding or authority without changing other object assemblies.
+     */
+    public synchronized void pruneRosterSummaryRetries(RosterCurrent current){
+        poll();for(var record:new java.util.ArrayList<>(completed))if(record.summaryBody!=null){
+            boolean retain=false;
+            try{retain=current.test(record.peer.bytes(),record.session.clone(),record.generation);}
+            finally{if(!retain)record.clearSummary();}
+        }
+    }
+    /**
+     * 所有側のcloseで保留summaryの平文をすべて消す。
+     * <p>
+     * Wipes all pending summary plaintext on owner close.
+     */
+    public synchronized void clearRosterSummaryRetries(){for(var record:completed)record.clearSummary();}
+    /**
+     * 既存の有限な完了記録だけを調べ、名簿ページの内容まで正確に一致する再送へACKを返す。
+     * <p>
+     * Looks only in existing bounded completion records and acknowledges roster retransmissions with exactly matching page contents.
+     */
+    public synchronized ManagementPageAck completedRosterAck(byte[] peer,byte[] session,long generation,ManagementPage page){
+        var replay=completedRosterAck(peer,session,generation,page,clock.millis());return replay==null?null:replay.ack();
+    }
+    /**
+     * 再送ACKにも完了記録の元の起点を付け、別対象の到着時刻を使わない。
+     * <p>
+     * Attaches the completion record's original start to replay ACKs instead of using another target's arrival time.
+     */
+    public synchronized RosterAckRetry completedRosterAck(byte[] peer,byte[] session,long generation,ManagementPage page,long receivedAt){
+        poll();long now=clock.millis();
+        if(page.kind()!=ManagementPage.Kind.ROSTER||receivedAt>now||now-receivedAt>=PROGRESS_MILLIS)return null;var key=new DhtId(peer);
+        for(var record:completed)if(record.confirmed&&record.matches(key,page,session,generation)
+                &&record.rosterPages!=null&&Crypto.equal(record.rosterPages[page.pageIndex()],digestAndWipe(page.data(),Crypto::blake2s)))
+            return new RosterAckRetry(peer,session,generation,acknowledged(Status.DUPLICATE,null,page,true).ack(),receivedAt,record.began);
+        return null;
+    }
+    /**
+     * キューに入らない名簿完了ACKを既存の8件の記録へ預ける。失効ACKには使わない。
+     * <p>
+     * Defers an unqueued roster completion ACK into the existing eight records, never for revocation ACKs.
+     */
+    public synchronized boolean deferRosterAck(byte[] peer,byte[] session,long generation,ManagementPageAck ack,long received,long began){
+        poll();if(!ack.complete()||ack.pageIndices().length>4)return false;var key=new DhtId(peer);
+        for(var record:completed)if(record.confirmed&&(record.first.kind()==ManagementPage.Kind.ROSTER||record.first.kind()==ManagementPage.Kind.ROSTER_SUMMARY)
+                &&record.peer.equals(key)&&record.generation==generation&&Arrays.equals(record.session,session)
+                &&Arrays.equals(record.first.group(),ack.group())&&Arrays.equals(record.first.operationId(),ack.operationId())
+                &&Arrays.equals(record.first.objectDigest(),ack.objectDigest())){
+            if(record.retry==null)record.retry=new RosterAckRetry(peer,session,generation,ack,received,Math.min(began,record.began));
+            return true;
+        }
+        return false;
+    }
+    /**
+     * 元の受信30秒・組立240秒の内側の再投入情報だけを返す。
+     * <p>
+     * Returns retry metadata only within thirty seconds of reception and 240 seconds of assembly start.
+     */
+    public synchronized java.util.List<RosterAckRetry> rosterAckRetries(){
+        poll();long now=clock.millis();var result=new java.util.ArrayList<RosterAckRetry>();
+        for(var record:completed)if(record.retry!=null){var retry=record.retry;
+            if(now<retry.received()||now<retry.began()||now-retry.received()>=PROGRESS_MILLIS||now-retry.began()>=TOTAL_MILLIS)record.clearRetry();
+            else result.add(retry);
+        }
+        return java.util.List.copyOf(result);
+    }
+    /**
+     * 再投入できた情報、または束縛を失った情報だけを消す。
+     * <p>
+     * Removes metadata that was requeued or lost its binding.
+     */
+    public synchronized void removeRosterAckRetry(RosterAckRetry retry){for(var record:completed)if(record.retry==retry){record.clearRetry();return;}}
+    /**
+     * 所有側のcloseで再投入情報をすべて捨て、他の管理記録を変えない。
+     * <p>
+     * Discards all retry metadata on owner close without changing other management records.
+     */
+    public synchronized void clearRosterAckRetries(){for(var record:completed)record.clearRetry();}
     /**
      * 検証や保存に失敗した未確定の組立完成を、有限の破棄記録へ移す。
      * <p>
@@ -188,7 +342,7 @@ public final class ManagementPageAssembler {
         while(iterator.hasNext()){
             var record=iterator.next();
             if(!record.confirmed&&record.matches(key,page,session,generation)){
-                iterator.remove();record.at=clock.millis();rememberRetired(record);return;
+                iterator.remove();record.clearSummary();record.at=clock.millis();rememberRetired(record);return;
             }
         }
     }
@@ -201,13 +355,21 @@ public final class ManagementPageAssembler {
     private static Result result(Status status){return new Result(status,null);}
     private void remove(DhtId peer){var assembly=assemblies.remove(peer);if(assembly!=null){assembly.lease.close();Crypto.wipe(assembly.buffer);Crypto.wipe(assembly.session);}}
     public synchronized void poll(){
-        long now=clock.millis();
+        long now=clock.millis();boolean rollback=now<lastClock;
         if(now<lastClock){
             // 時計が戻っても完了・破棄の記録を保ち、保持期間を今から数え直す。
             // Preserve completion and retirement records on clock rollback and restart their retention period from now.
             for(var record:completed)record.at=now;
             for(var record:retired)record.at=now;
         }lastClock=now;
+        var pending=completed.iterator();
+        while(pending.hasNext()){
+            var record=pending.next();
+            if(record.summaryBody!=null&&(rollback||now<record.summaryReceived||now<record.began
+                    ||now-record.summaryReceived>=PROGRESS_MILLIS||now-record.began>=TOTAL_MILLIS)){
+                pending.remove();record.clearSummary();record.at=now;rememberRetired(record);
+            }
+        }
         discard(completed,r->now-r.at>=TOTAL_MILLIS);discard(retired,r->now-r.at>=TOTAL_MILLIS);
         var iterator=assemblies.entrySet().iterator();
         while(iterator.hasNext()){

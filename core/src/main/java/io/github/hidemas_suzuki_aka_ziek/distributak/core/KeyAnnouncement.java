@@ -90,6 +90,18 @@ public final class KeyAnnouncement {
             throw new SecurityException("Key announcement does not match the retained key");
     }
     /**
+     * 受信・復元・入り直しで鍵の一致と保存済み告知の順位を共通に照合する。
+     * <p>
+     * Shares key equality and retained announcement rank checks across receipt, restore and rejoin.
+     * @param retained 保存済み告知。初回移行ではnull。The retained announcement, null during initial migration.
+     */
+    public void checkKey(byte[] expectedGroup,long version,byte[] key,KeyAnnouncement retained){
+        checkKey(expectedGroup,version,key);
+        if(retained!=null&&(version<retained.keyVersion||version==retained.keyVersion
+                &&(!Crypto.equal(keyCommitment,retained.keyCommitment)||compare(this,retained)<0)))
+            throw new SecurityException("Retained announcement cannot regress");
+    }
+    /**
      * 用途・グループ・版を結んだ既存の BLAKE2s の入力。
      * <p>
      * Existing BLAKE2s input binding purpose, group and version.

@@ -179,11 +179,7 @@ public final class AdminState {
      * Binds only a matching announcement to the saved candidate. Neither rank nor key regresses at the same version.
      */
     synchronized void recordGroupKey(KeyAnnouncement value,byte[] key,long version){
-        requireWritable();verifyAnnouncement(value,revocations());value.checkKey(group,version,key);
-        if(!coversRevocations(revocations()))throw new SecurityException("Revocations omit accepted subjects");
-        if(announcement!=null&&(value.keyVersion()<announcement.keyVersion()||value.keyVersion()==announcement.keyVersion()
-                &&(!Crypto.equal(value.keyCommitment(),announcement.keyCommitment())||KeyAnnouncement.compare(value,announcement)<0)))
-            throw new SecurityException("Retained announcement cannot regress");
+        requireWritable();checkGroupKeyCandidate(value,key,version);
         var next=new AdminRecordStore.Snapshot(journal,anchorSignature,revocations.encode(),chain.lastKey(),revocations.version(),value.encode());
         store.save(next);announcement=value;
     }
@@ -193,7 +189,17 @@ public final class AdminState {
      * Checks the saved announcement against the saved key itself. Legacy snapshots without announcements remain readable.
      */
     public synchronized void checkRestoredGroupKey(byte[] key,long version){
-        if(announcement!=null)announcement.checkKey(group,version,key);
+        if(announcement!=null)announcement.checkKey(group,version,key,announcement);
+    }
+    /**
+     * 現在の権限と失効の和を検証し、保存する前に鍵と告知の一致を調べる。状態は変えない。
+     * <p>
+     * Verifies current authority and the revocation union, then checks the key and announcement before saving without changing state.
+     */
+    public synchronized void checkGroupKeyCandidate(KeyAnnouncement value,byte[] key,long version){
+        verifyAnnouncement(value,revocations());
+        if(!coversRevocations(revocations()))throw new SecurityException("Revocations omit accepted subjects");
+        value.checkKey(group,version,key,announcement);
     }
     /** この1か所で、失効一覧が使える状態かを判定する。 */
     public synchronized AdminRecords.Record revocations() {

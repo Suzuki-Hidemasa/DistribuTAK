@@ -19,10 +19,10 @@ class ManagedPendingTest {
     };
     @Test void eightEntriesAreKeptAndTheNinthIsRefusedWithoutEviction() {
         var pending=new ManagedPending(clock);
-        for(int i=0;i<8;i++)assertTrue(pending.offer(revocationRecord(i,1,0,NOW,0),ManagedVerdict.NEEDS_ANNOUNCEMENT));
-        assertFalse(pending.offer(revocationRecord(9,1,0,NOW,0),ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        for(int i=0;i<8;i++)assertTrue(pending.offer(revocationRecord(i,1,0,NOW,0),ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(i/2)));
+        assertFalse(pending.offer(revocationRecord(9,1,0,NOW,0),ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(9)));
         assertEquals(8,pending.size());
-        assertTrue(pending.offer(revocationRecord(0,1,0,NOW,0),ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        assertTrue(pending.offer(revocationRecord(0,1,0,NOW,0),ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(0)));
         assertEquals(8,pending.size());
     }
     @Test void totalBytesAreBoundedAndOldEntriesAreNotDiscarded() {

@@ -27,6 +27,7 @@ class ManagedVerifierTest {
     private final Clock clock=Clock.fixed(Instant.ofEpochMilli(NOW),ZoneOffset.UTC);
     private AdminState state;
     private ManagedVerifier verifier;
+    ManagedVerifier verifierForPending(){return verifier;}
 
     @BeforeEach void setUp() {
         state=new AdminState(GROUP,pub(1),clock,new InMemoryAdminRecordStore());

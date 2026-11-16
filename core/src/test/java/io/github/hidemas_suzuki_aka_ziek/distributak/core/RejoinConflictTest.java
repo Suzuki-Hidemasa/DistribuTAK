@@ -43,6 +43,38 @@ class RejoinConflictTest {
             assertTrue(AdminState.sameSnapshot(before,state.snapshot()));assertTrue(joiner.isClosed());state.checkRestoredGroupKey(f.groupKey,0);
         }
     }
+    @Test void firstAnnouncementMatchesRetainedVersionFiveKeyWithoutInitializingSavedState(){
+        var state=t.saved();var before=state.snapshot();assertNull(state.announcement());
+        try(var invite=f.invitation();var joiner=JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,state,f.f.certificate(),0,f.groupKey,null,state.revokedSubjects())){
+            try(var joined=joiner.receive(reply(invite,joiner.request(),f.groupKey,announcement(state,f.groupKey,f.f.now)))){
+                assertArrayEquals(f.groupKey,joined.groupKey());assertNotNull(joined.state().announcement());
+            }
+        }
+        assertTrue(AdminState.sameSnapshot(before,state.snapshot()));assertNull(state.announcement());
+    }
+    @ParameterizedTest @ValueSource(booleans={false,true})
+    void unsavedAnnouncementCannotInitializeVersionFiveComparison(boolean unknownSigner){
+        var state=t.saved();var before=state.snapshot();var r=state.revocations();var a=state.administrators();
+        var unsaved=KeyAnnouncement.issue(f.f.group,unknownSigner?key(99):f.f.a,0,f.f.now,r.version(),Crypto.blake2s(r.signedBytes()),
+            KeyAnnouncement.commitment(f.f.group,0,f.groupKey),a.version(),Crypto.blake2s(a.signedBytes()));
+        try(var invite=f.invitation()){
+            assertThrows(SecurityException.class,()->JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,state,f.f.certificate(),0,f.groupKey,unsaved,state.revokedSubjects()));
+        }
+        assertTrue(AdminState.sameSnapshot(before,state.snapshot()));assertNull(state.announcement());
+    }
+    @Test void suppliedAnnouncementCannotRegressOrReplaceSavedComparison(){
+        var state=t.saved();var retained=announcement(state,f.groupKey,f.f.now);state.recordGroupKey(retained,f.groupKey,0);var before=state.snapshot();
+        try(var invite=f.invitation()){
+            assertThrows(SecurityException.class,()->JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,state,f.f.certificate(),0,f.groupKey,
+                announcement(state,f.groupKey,f.f.now-1),state.revokedSubjects()));
+        }
+        var supplied=announcement(state,f.groupKey,f.f.now+1);
+        try(var invite=f.invitation();var joiner=JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,state,f.f.certificate(),0,f.groupKey,supplied,state.revokedSubjects());
+            var joined=joiner.receive(reply(invite,joiner.request(),f.groupKey,retained))){
+            assertArrayEquals(f.groupKey,joined.groupKey());
+        }
+        assertTrue(AdminState.sameSnapshot(before,state.snapshot()));assertArrayEquals(retained.encode(),state.announcement().encode());
+    }
     @Test void oldRejoinApiCannotAcceptEqualVersionWithoutRetainedKey(){
         var state=t.saved();try(var invite=f.invitation();var joiner=JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,state,f.f.certificate(),0)){
             assertThrows(SecurityException.class,()->joiner.receive(reply(invite,joiner.request(),f.groupKey,announcement(state,f.groupKey,f.f.now))));

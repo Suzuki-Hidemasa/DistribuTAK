@@ -32,14 +32,26 @@ class RejoinTest {
         }
     }
     @Test void expiredSavedCertificateCanRejoinWithNewerKeyVersion() {
-        var saved=saved();
+        var saved=saved();var issuer=saved();var r=issuer.revocations();var a=issuer.administrators();
+        var announcement=KeyAnnouncement.issue(f.f.group,f.f.a,1,f.f.now,r.version(),Crypto.blake2s(r.signedBytes()),
+            KeyAnnouncement.commitment(f.f.group,1,f.groupKey),a.version(),Crypto.blake2s(a.signedBytes()));
+        issuer.recordGroupKey(announcement,f.groupKey,1);
         var expired=AdminRecords.certificate(f.f.group,identity,Crypto.x25519Public(f.f.handshake),SignaturePurpose.identityProof(f.f.identity,f.f.group,Crypto.x25519Public(f.f.handshake)),f.f.now-AdminRecords.CERTIFICATE_LIFETIME_MILLIS,f.f.a);
         try(var invite=f.invitation();var admin=f.admin(invite);
             var joiner=JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,saved,expired,0);
-            var material=JoinHandshake.Materials.rejoin(f.chain(),f.f.revocations(0,f.f.now,List.of(),f.f.a),1,f.groupKey,identity)) {
+            var material=JoinHandshake.Materials.verified(issuer,f.chain(),1,f.groupKey,identity)) {
             try(var result=joiner.receive(admin.respond(joiner.request(),f.adminX,f.f.a,material))) {
                 assertEquals(1,result.groupKeyVersion());assertArrayEquals(identity,result.certificate().field(0));
             }
+        }
+    }
+    @Test void oldOverloadRejectsUnannouncedLargerVersion(){
+        var saved=saved();
+        try(var invite=f.invitation();var admin=f.admin(invite);
+            var joiner=JoinHandshake.Joiner.rejoin(invite,f.f.identity,key(73),f.f.clock,saved,f.f.certificate(),0);
+            var material=JoinHandshake.Materials.rejoin(f.chain(),f.f.revocations(0,f.f.now,List.of(),f.f.a),1,f.groupKey,identity)){
+            byte[] reply=admin.respond(joiner.request(),f.adminX,f.f.a,material);
+            assertThrows(SecurityException.class,()->joiner.receive(reply));
         }
     }
     @Test void rejoinRejectsOldHandshakeAndDifferentIdentityBeforeRequest() {
