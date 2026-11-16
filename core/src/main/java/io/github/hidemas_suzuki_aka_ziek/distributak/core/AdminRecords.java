@@ -248,7 +248,11 @@ public final class AdminRecords {
     static Record wrapped(byte[] group, long version, long signedAt, byte[] recipient, byte[] handshake, byte[] enc, byte[] ciphertext, byte[] adminSecret) {
         return sign(Kind.WRAPPED_KEY,group,version,signedAt,List.of(),new byte[][]{recipient,handshake,enc,ciphertext},0,0,adminSecret);
     }
-    /** 告知に結んだ形式 2 の包み。 / A format-2 wrapped key bound to an announcement. */
+    /**
+     * 告知に結んだ形式 2 の包み。
+     * <p>
+     * A format-2 wrapped key bound to an announcement.
+     */
     public static Record wrapped(byte[] group,long version,long signedAt,byte[] recipient,byte[] handshake,byte[] enc,
                                   byte[] ciphertext,byte[] adminSecret,byte[] announcementDigest) {
         var fields=new byte[][]{recipient,handshake,enc,ciphertext,announcementDigest};

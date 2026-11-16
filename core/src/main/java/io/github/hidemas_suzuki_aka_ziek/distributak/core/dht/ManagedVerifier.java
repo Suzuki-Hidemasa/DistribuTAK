@@ -102,16 +102,17 @@ public final class ManagedVerifier {
                         &&Arrays.equals(candidate.encode(),held.encode())?ManagedVerdict.DUPLICATE:ManagedVerdict.INVALID;
             }
             if(inner.version()!=next||!trust.continuesChain(inner))return ManagedVerdict.INVALID;
-        }else if(!currentSigner){
+        }
+        // 自己削除の欠番は上で断る。通常の欠番は、今の管理者かを調べる前に保留にする。
+        // Self-removal gaps are rejected above. Ordinary gaps are deferred before checking current administrator authority.
+        if(!selfRemoval&&(candidate.adminVersion()>latest.version()||(listKind&&inner.version()>next)))return ManagedVerdict.needsVersion(next);
+        if(!selfRemoval&&!currentSigner){
             // 勝ち直しは種類 2 の同版競合だけ。候補の権限は鎖を確かめたあとで使う。
             // Winning back is limited to kind-2 same-version competition; candidate authority follows chain validation.
             if(kind!=DhtKeys.LATEST_ADMINS||inner.version()!=latest.version()||!namedMatches
                     ||candidate.adminVersion()!=inner.version()-1||!inner.hasEntry(candidate.signer())
                     ||AdminRecords.compare(inner,latest)<=0||!trust.continuesChain(inner))return ManagedVerdict.INVALID;
         }
-        // 足りない版は、先に取る。外側が先の版を名指すとき、一覧が 2 つ以上先のとき。
-        // Fetch missing versions first: the outer names a later version, or the list is two or more ahead.
-        if(candidate.adminVersion()>latest.version()||(listKind&&inner.version()>next))return ManagedVerdict.needsVersion(next);
         // 外側の権限。名指す版が信頼済みで、写しが一致し、署名者が今の管理者であること。
         // Outer authority: the named version is trusted, its digest matches, and the signer is a current administrator.
         if(named==null)return ManagedVerdict.INVALID;
@@ -141,17 +142,20 @@ public final class ManagedVerifier {
         var named=trust.at(version);
         return named!=null&&Crypto.equal(Crypto.blake2s(named.signedBytes()),digest)?null:ManagedVerdict.INVALID;
     }
-    private ManagedVerdict checkAnnouncement(KeyAnnouncement announcement,byte[] group) {
-        announcement.verify(group,trust.latest().entries());
-        if(tooFarAhead(announcement.signedAt()))return ManagedVerdict.INVALID;
+    private record AnnouncementCheck(ManagedVerdict verdict,AdminRecords.Record body){}
+    private AnnouncementCheck checkAnnouncement(KeyAnnouncement announcement,byte[] group) {
+        if(!Crypto.equal(announcement.group(),group)||!announcement.hasValidSignature()||tooFarAhead(announcement.signedAt()))
+            return new AnnouncementCheck(ManagedVerdict.INVALID,null);
         var authority=adminReference(announcement.adminVersion(),announcement.adminDigest());
-        if(authority!=null)return authority;
+        if(authority!=null)return new AnnouncementCheck(authority,null);
+        announcement.verify(group,trust.latest().entries());
         var body=dependencies.revocations(announcement.revocationVersion(),announcement.revocationDigest());
-        if(body==null)return ManagedVerdict.NEEDS_ANNOUNCEMENT;
+        if(body==null)return new AnnouncementCheck(ManagedVerdict.NEEDS_ANNOUNCEMENT,null);
         body.verify(AdminRecords.Kind.REVOCATIONS,group,trust.latest().entries());
         if(body.format()!=2||body.version()!=announcement.revocationVersion()||tooFarAhead(body.signedAt())
-                ||!Crypto.equal(Crypto.blake2s(body.signedBytes()),announcement.revocationDigest())||!revocations.covers(body))return ManagedVerdict.INVALID;
-        return null;
+                ||!Crypto.equal(Crypto.blake2s(body.signedBytes()),announcement.revocationDigest())||!revocations.covers(body))
+            return new AnnouncementCheck(ManagedVerdict.INVALID,null);
+        return new AnnouncementCheck(null,body);
     }
     private AdminRecords.Record recipientCertificate(ManagedDhtRecord record) {
         var cert=AdminRecords.decode(record.recipientCertificate());
@@ -166,13 +170,18 @@ public final class ManagedVerifier {
     private ManagedVerdict judgeKey(ManagedDhtRecord candidate,ManagedDhtRecord held,byte[] memberId,boolean store) {
         if(dependencies==null||revocations==null)return ManagedVerdict.INVALID;
         var latest=trust.latest();
-        if(clock.millis()>=candidate.expiresAt()||tooFarAhead(candidate.signedAt())||!latest.hasEntry(candidate.signer()))return ManagedVerdict.INVALID;
+        if(clock.millis()>=candidate.expiresAt()||tooFarAhead(candidate.signedAt()))return ManagedVerdict.INVALID;
+        if(candidate.kind()==DhtKeys.KEY_ANNOUNCEMENT){
+            var a=candidate.announcement();
+            if(!a.hasValidSignature()||tooFarAhead(a.signedAt()))return ManagedVerdict.INVALID;
+        }else if(!candidate.inner().hasValidSignature()||tooFarAhead(candidate.inner().signedAt()))return ManagedVerdict.INVALID;
         var authority=adminReference(candidate.adminVersion(),candidate.adminDigest());
         if(authority!=null)return authority;
+        if(!latest.hasEntry(candidate.signer()))return ManagedVerdict.INVALID;
         if(store&&!boundTo(latest,candidate.signer(),memberId))return ManagedVerdict.INVALID;
         if(candidate.kind()==DhtKeys.KEY_ANNOUNCEMENT){
             var announcement=candidate.announcement();
-            var result=checkAnnouncement(announcement,candidate.group());if(result!=null)return result;
+            var result=checkAnnouncement(announcement,candidate.group());if(result.verdict()!=null)return result.verdict();
             int order=held==null?1:KeyAnnouncement.compare(announcement,held.announcement());
             return ranked(candidate,held,order);
         }
@@ -182,12 +191,14 @@ public final class ManagedVerifier {
         var announcement=dependencies.announcement(wrapped.field(4));
         if(announcement==null)return ManagedVerdict.NEEDS_ANNOUNCEMENT;
         if(!Crypto.equal(Crypto.blake2s(announcement.signedBytes()),wrapped.field(4))||announcement.keyVersion()!=wrapped.version())return ManagedVerdict.INVALID;
-        var result=checkAnnouncement(announcement,candidate.group());if(result!=null)return result;
-        var body=dependencies.revocations(announcement.revocationVersion(),announcement.revocationDigest());
+        var result=checkAnnouncement(announcement,candidate.group());if(result.verdict()!=null)return result.verdict();
+        var body=result.body();
         if(body.hasEntry(candidate.subject()))return ManagedVerdict.INVALID;
         if(held==null)return ManagedVerdict.ACCEPTED;
         var oldCertificate=AdminRecords.decode(held.recipientCertificate());
         if(cert.issuedAt()==oldCertificate.issuedAt()&&!Arrays.equals(cert.encode(),oldCertificate.encode()))return ManagedVerdict.INVALID;
+        int versionOrder=Long.compare(wrapped.version(),held.inner().version());
+        if(versionOrder!=0)return ranked(candidate,held,versionOrder);
         var oldAnnouncement=dependencies.announcement(held.inner().field(4));
         if(oldAnnouncement==null)return ManagedVerdict.NEEDS_ANNOUNCEMENT;
         int order=KeyAnnouncement.compare(announcement,oldAnnouncement);
@@ -195,6 +206,26 @@ public final class ManagedVerifier {
         if(order==0)order=Long.compare(wrapped.signedAt(),held.inner().signedAt());
         if(order==0)order=AdminRecords.compareBytes(wrapped.signedBytes(),held.inner().signedBytes());
         return ranked(candidate,held,order);
+    }
+    int comparePending(ManagedDhtRecord a,ManagedDhtRecord b) {
+        int order=Long.compare(a.version(),b.version());
+        if(order!=0)return order;
+        if(a.kind()==DhtKeys.KEY_ANNOUNCEMENT)order=KeyAnnouncement.compare(a.announcement(),b.announcement());
+        else if(a.kind()==DhtKeys.WRAPPED_KEY){
+            var aa=dependencies==null?null:dependencies.announcement(a.inner().field(4));
+            var ba=dependencies==null?null:dependencies.announcement(b.inner().field(4));
+            if(aa!=null&&ba!=null)order=KeyAnnouncement.compare(aa,ba);
+            if(order==0)order=Long.compare(pendingCertificateTime(a),pendingCertificateTime(b));
+            if(order==0)order=Long.compare(a.inner().signedAt(),b.inner().signedAt());
+            if(order==0)order=AdminRecords.compareBytes(a.inner().signedBytes(),b.inner().signedBytes());
+        }else order=AdminRecords.compare(a.inner(),b.inner());
+        if(order==0)order=Long.compare(a.signedAt(),b.signedAt());
+        if(order==0)order=Long.compare(a.publicationSeq(),b.publicationSeq());
+        return order;
+    }
+    private static long pendingCertificateTime(ManagedDhtRecord record) {
+        try{return AdminRecords.decode(record.recipientCertificate()).issuedAt();}
+        catch(RuntimeException invalid){return Long.MIN_VALUE;}
     }
     private static ManagedVerdict ranked(ManagedDhtRecord candidate,ManagedDhtRecord held,int order) {
         if(order>0)return ManagedVerdict.ACCEPTED;

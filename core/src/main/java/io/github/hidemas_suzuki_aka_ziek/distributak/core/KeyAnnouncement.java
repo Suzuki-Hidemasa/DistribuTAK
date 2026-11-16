@@ -37,7 +37,11 @@ public final class KeyAnnouncement {
         catch(IOException impossible){throw invalid();}
     }
     private static IllegalArgumentException invalid(){return new IllegalArgumentException("告知の形式が違います");}
-    /** 告知を既存の用途で署名する。 / Signs an announcement with the existing purpose. */
+    /**
+     * 告知を既存の用途で署名する。
+     * <p>
+     * Signs an announcement with the existing purpose.
+     */
     public static KeyAnnouncement issue(byte[] group,byte[] secret,long keyVersion,long signedAt,long revocationVersion,
                                          byte[] revocationDigest,byte[] keyCommitment,long adminVersion,byte[] adminDigest) {
         var unsigned=new KeyAnnouncement(group,Crypto.ed25519Public(secret),keyVersion,signedAt,revocationVersion,
@@ -48,7 +52,11 @@ public final class KeyAnnouncement {
     private static void tag(CodedInputStream in,int field,int wire)throws IOException{if(in.readTag()!=(field<<3|wire))throw invalid();}
     private static byte[] bytes(CodedInputStream in,int field)throws IOException{tag(in,field,2);return in.readByteArray();}
     private static long number(CodedInputStream in,int field)throws IOException{tag(in,field,0);return in.readUInt64();}
-    /** 正規形だけを読み、署名は verify で調べる。 / Reads canonical syntax; verify checks the signature. */
+    /**
+     * 正規形だけを読み、署名は verify で調べる。
+     * <p>
+     * Reads canonical syntax; verify checks the signature.
+     */
     public static KeyAnnouncement decode(byte[] wire) {
         if(wire==null||wire.length>1024)throw invalid();
         try{
@@ -61,13 +69,21 @@ public final class KeyAnnouncement {
             return record;
         }catch(IOException malformed){throw invalid();}
     }
-    /** グループ・今の管理者・署名を検査する。 / Checks group, current administrator and signature. */
+    /**
+     * グループ・今の管理者・署名を検査する。
+     * <p>
+     * Checks group, current administrator and signature.
+     */
     public void verify(byte[] expectedGroup,List<byte[]> administrators) {
         if(!Crypto.equal(group,expectedGroup)||!AdminRecords.contains(administrators,signer)||!hasValidSignature())
             throw new SecurityException("告知の署名か宛先が違います");
     }
     public boolean hasValidSignature(){return SignaturePurpose.KEY_ROTATION.verify(signer,payload,signature);}
-    /** 用途・グループ・版を結んだ既存の BLAKE2s の入力。 / Existing BLAKE2s input binding purpose, group and version. */
+    /**
+     * 用途・グループ・版を結んだ既存の BLAKE2s の入力。
+     * <p>
+     * Existing BLAKE2s input binding purpose, group and version.
+     */
     public static byte[] commitment(byte[] group,long version,byte[] key) {
         Crypto.length(group,32);Crypto.length(key,32);if(version<0)throw invalid();
         byte[] input=Crypto.concat(COMMITMENT_DOMAIN,group,ByteBuffer.allocate(8).putLong(version).array(),key);

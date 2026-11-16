@@ -47,4 +47,35 @@ class ManagedPendingTest {
             assertFalse(pending.offer(record,verdict));
         assertEquals(0,pending.size());
     }
+    @Test void aBackwardClockDiscardsPendingEntriesAndReleasesTheirBytes() {
+        var pending=new ManagedPending(clock);
+        assertTrue(pending.offer(revocationRecord(1,1,0,NOW,0),ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        time.decrementAndGet();assertEquals(0,pending.size());assertEquals(0,pending.bytes());
+    }
+    @Test void findAndStoreIdentitiesHaveIndependentLimitsAndDeadlines() {
+        var pending=new ManagedPending(clock);var r=revocationRecord(1,1,0,NOW,0);
+        assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+        for(int i=1;i<8;i++)assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(i)));
+        assertEquals(8,pending.size());assertEquals(8*r.encode().length,pending.bytes());
+        assertFalse(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(9)));
+        time.addAndGet(120000);assertEquals(0,pending.size());assertEquals(0,pending.bytes());
+    }
+
+    @Test void identicalBytesWithDifferentIdentitiesStillRespectTheByteLimit() {
+        var pending=new ManagedPending(clock);var r=revocationRecord(1,1,0,NOW,60000);
+        assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(1)));
+        assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(2)));
+        assertFalse(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(3)));
+        assertEquals(2,pending.size());assertEquals(2*r.encode().length,pending.bytes());
+    }
+    @Test void eachIdentityHasItsOwnFirstArrivalDeadline() {
+        var pending=new ManagedPending(clock);var r=revocationRecord(1,1,0,NOW,0);
+        assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(1)));
+        time.addAndGet(60000);
+        assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(2)));
+        assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT,digest(1)));
+        time.addAndGet(60000);assertEquals(1,pending.size());
+        time.addAndGet(60000);assertEquals(0,pending.size());
+    }
+
 }

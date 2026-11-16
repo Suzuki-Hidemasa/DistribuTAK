@@ -322,4 +322,41 @@ class ManagedDhtRecordTest {
         // 形式 2 は通る。 / Format 2 passes.
         verify(ManagedDhtRecord.issue(DhtKeys.LATEST_ADMINS,GROUP,secret(1),admins(3,NOW,1,2),1,3,digest(5),NOW,null).encode());
     }
+    private static ManagedDhtRecord exactSize(int size) {
+        long big=1L<<62;
+        var base=ManagedDhtRecord.issue(DhtKeys.LATEST_REVOCATIONS,GROUP,secret(1),revocations(1,big,8),big,big,digest(5),big,null);
+        for(int seqBytes=1;seqBytes<=9;seqBytes++)for(int adminBytes=1;adminBytes<=9;adminBytes++){
+            var f=fields(base);
+            f[12]=1L<<((seqBytes-1)*7);f[13]=1L<<((adminBytes-1)*7);
+            byte[] payload=payload(f,order(14));
+            if(envelope(payload,new byte[64]).length==size)return verify(resign(payload));
+        }
+        throw new AssertionError("Exact encoded boundary unavailable");
+    }
+    @Test void exactlySevenHundredSixtyEightBytesUsesStore() {
+        var edge=exactSize(768);assertEquals(768,edge.encode().length);
+        assertTrue(edge.fitsStore());assertEquals(ManagedDhtRecord.Transport.STORE,edge.transport());
+    }
+    @Test void exactlySevenHundredSixtyNineBytesUsesTransfer() {
+        var edge=exactSize(769);assertEquals(769,edge.encode().length);
+        assertFalse(edge.fitsStore());assertEquals(ManagedDhtRecord.Transport.TRANSFER,edge.transport());
+    }
+    @Test void receivedZeroAdministratorListIsRefused() {
+        byte[] emptyPayload=wire(out->{
+            out.writeUInt32(1,AdminRecords.Kind.ADMINS.ordinal()+1);
+            out.writeByteArray(2,GROUP);out.writeByteArray(3,pub(1));
+            out.writeUInt64(4,1);out.writeUInt64(5,NOW);
+            out.writeUInt32(15,2);out.writeByteArray(16,SignaturePurpose.ADMINISTRATORS.purpose());
+        });
+        var f=fields(ManagedDhtRecord.issue(DhtKeys.LATEST_ADMINS,GROUP,secret(1),admins(1,NOW,1),1,0,digest(5),NOW,null));
+        f[11]=envelope(emptyPayload,SignaturePurpose.ADMINISTRATORS.sign(secret(1),emptyPayload));
+        reject(()->verify(resign(payload(f,order(14)))));
+    }
+    @Test void selfRemovalListCannotBeCarriedAsAnAnnouncement() {
+        var selfRemoval=AdminRecords.list(AdminRecords.Kind.ADMINS,GROUP,1,NOW,List.of(pub(2)),secret(1));
+        var a=io.github.hidemas_suzuki_aka_ziek.distributak.core.KeyAnnouncement.issue(GROUP,secret(1),1,NOW,0,digest(5),digest(6),0,digest(5));
+        var f=fields(ManagedDhtRecord.issue(GROUP,secret(1),a,1,0,digest(5),NOW));f[11]=selfRemoval.encode();
+        reject(()->verify(resign(payload(f,order(14)))));
+    }
+
 }

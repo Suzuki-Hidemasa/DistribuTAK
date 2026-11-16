@@ -151,8 +151,8 @@ class ManagedKeyVerifierTest {
         var a=announce(3,NOW);var record=wrap(a,certificate,NOW,1);announcements.clear();
         var verdict=verifier.judge(record,null);assertEquals(NEEDS_ANNOUNCEMENT,verdict.status());
         var pending=new ManagedPending(clock);assertTrue(pending.offer(record,verdict));
-        assertTrue(pending.retry(verifier,key->null).isEmpty());
-        announcements.add(a);var resolved=pending.retry(verifier,key->null);
+        assertTrue(pending.retry(verifier,key->null,c->{}).isEmpty());
+        announcements.add(a);var resolved=pending.retry(verifier,key->null,c->{});
         assertEquals(1,resolved.size());assertEquals(ACCEPTED,resolved.get(0).verdict().status());
         assertEquals(0,pending.size());
     }
@@ -161,14 +161,14 @@ class ManagedKeyVerifierTest {
         byte[] sender=state.administrators().binding(pub(1)).memberId();
         var verdict=verifier.judgeStore(record,null,sender);assertEquals(NEEDS_ANNOUNCEMENT,verdict.status());
         var pending=new ManagedPending(clock);assertTrue(pending.offer(record,verdict,sender));sender[0]^=1;
-        announcements.add(a);var resolved=pending.retry(verifier,key->record);
+        announcements.add(a);var resolved=pending.retry(verifier,key->record,c->{});
         assertEquals(DUPLICATE,resolved.get(0).verdict().status());
     }
     @Test void pendingWrapIsRefusedWhenTheRecipientIsRevokedWhileWaiting() {
         var a=announce(3,NOW);var record=wrap(a,certificate,NOW,1);announcements.clear();
         var pending=new ManagedPending(clock);assertTrue(pending.offer(record,verifier.judge(record,null)));
         union.add(AdminRecords.list(AdminRecords.Kind.REVOCATIONS,GROUP,1,NOW,List.of(member),secret(1)));
-        announcements.add(a);var resolved=pending.retry(verifier,key->null);
+        announcements.add(a);var resolved=pending.retry(verifier,key->null,c->{});
         assertEquals(INVALID,resolved.get(0).verdict().status());assertEquals(0,pending.size());
     }
     @Test void certificatesForAnotherGroupAreRefused() {
@@ -188,4 +188,107 @@ class ManagedKeyVerifierTest {
         var future=KeyAnnouncement.issue(GROUP,secret(1),3,NOW,0,Crypto.blake2s(revocations.get(0).signedBytes()),digest(8),2,adminDigest());
         expect(NEEDS_VERSION,outer(future,1),null);
     }
+    @Test void pendingCandidatesApplyTheHigherKeyVersionFirstInBothArrivalOrders() {
+        var low=announce(3,NOW);var high=announce(4,NOW);
+        var older=wrap(low,certificate,NOW,1);var newer=wrap(high,certificate,NOW,1);
+        for(boolean reversed:new boolean[]{false,true}){
+            var pending=new ManagedPending(clock);announcements.clear();
+            for(var r:reversed?List.of(older,newer):List.of(newer,older))
+                assertTrue(pending.offer(r,verifier.judge(r,null)));
+            announcements.add(low);announcements.add(high);
+            var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
+            var results=pending.retry(verifier,held::get,c->held.put(c.record().key(),c.record()));
+            assertEquals(4,held.get(newer.key()).inner().version());
+            assertEquals(List.of(ACCEPTED,OLD),results.stream().map(c->c.verdict().status()).toList());
+            assertEquals(0,pending.size());
+        }
+    }
+    @Test void differentKeyVersionsDoNotNeedTheHeldAnnouncement() {
+        var old=announce(3,NOW);var high=announce(4,NOW);
+        var held=wrap(old,certificate,NOW,1);var candidate=wrap(high,certificate,NOW,1);
+        announcements.remove(old);expect(ACCEPTED,candidate,held);
+        announcements.add(old);announcements.remove(high);expect(OLD,held,candidate);
+    }
+    @Test void equalKeyVersionsStillNeedTheHeldAnnouncement() {
+        var old=announce(3,NOW-1);var high=announce(3,NOW);
+        var held=wrap(old,certificate,NOW,1);var candidate=wrap(high,certificate,NOW,1);
+        announcements.remove(old);expect(NEEDS_ANNOUNCEMENT,candidate,held);
+    }
+    @Test void checkedRevocationBodyIsReadOnlyOnce() {
+        var a=announce(3,NOW);var record=wrap(a,certificate,NOW,1);
+        var reads=new java.util.concurrent.atomic.AtomicInteger();
+        verifier=new ManagedVerifier(new AdminStateTrust(state),clock,union,new ManagedDependencies(){
+            public KeyAnnouncement announcement(byte[] digest){return a;}
+            public AdminRecords.Record revocations(long version,byte[] digest){return reads.incrementAndGet()==1?revocations.get(0):null;}
+        });
+        expect(ACCEPTED,record,null);assertEquals(1,reads.get());
+    }
+    @Test void newAdministratorOuterWaitsForTheMissingVersionForBothKeyKinds() {
+        var next=AdminProofFixtures.list(GROUP,1,NOW-100,List.of(pub(1),pub(2),pub(3)),secret(1),secret(1),secret(2),secret(3));
+        var a=KeyAnnouncement.issue(GROUP,secret(3),3,NOW,0,Crypto.blake2s(revocations.get(0).signedBytes()),digest(8),1,Crypto.blake2s(next.signedBytes()));
+        announcements.add(a);
+        var announcement=ManagedDhtRecord.issue(GROUP,secret(3),a,1,1,Crypto.blake2s(next.signedBytes()),NOW);
+        var w=wrap(a,certificate,NOW,3);
+        var wrapped=ManagedDhtRecord.issue(DhtKeys.WRAPPED_KEY,GROUP,secret(3),w.inner(),1,1,Crypto.blake2s(next.signedBytes()),NOW,certificate.encode());
+        expect(NEEDS_VERSION,announcement,null);expect(NEEDS_VERSION,wrapped,null);
+        assertTrue(state.acceptAdministrators(next,v->fail()));
+        expect(ACCEPTED,announcement,null);expect(ACCEPTED,wrapped,null);
+    }
+    @Test void newAdministratorInnerAnnouncementWaitsBeforeCheckingItsAuthority() {
+        var next=AdminProofFixtures.list(GROUP,1,NOW-100,List.of(pub(1),pub(2),pub(3)),secret(1),secret(1),secret(2),secret(3));
+        var a=KeyAnnouncement.issue(GROUP,secret(3),3,NOW,0,Crypto.blake2s(revocations.get(0).signedBytes()),digest(8),1,Crypto.blake2s(next.signedBytes()));
+        announcements.add(a);expect(NEEDS_VERSION,outer(a,1),null);
+        expect(NEEDS_VERSION,wrap(a,certificate,NOW,1),null);
+        assertTrue(state.acceptAdministrators(next,v->fail()));
+        expect(ACCEPTED,outer(a,1),null);expect(ACCEPTED,wrap(a,certificate,NOW,1),null);
+    }
+
+    @Test void wrongStoreIdentityDoesNotSuppressTheSignersStoreAfterTheVersionArrives() {
+        var next=AdminProofFixtures.list(GROUP,1,NOW-100,List.of(pub(1),pub(2)),secret(1),secret(1),secret(2));
+        var a=announce(3,NOW);
+        var record=ManagedDhtRecord.issue(GROUP,secret(1),a,1,1,Crypto.blake2s(next.signedBytes()),NOW);
+        var pending=new ManagedPending(clock);
+        byte[] correct=state.administrators().binding(pub(1)).memberId();
+        byte[] wrong=state.administrators().binding(pub(2)).memberId();
+        assertTrue(pending.offer(record,verifier.judgeStore(record,null,wrong),wrong));
+        assertTrue(pending.offer(record,verifier.judgeStore(record,null,correct),correct));
+        assertEquals(2,pending.size());
+        assertTrue(state.acceptAdministrators(next,v->fail()));
+        var applied=new ArrayList<ManagedDhtRecord>();
+        var results=pending.retry(verifier,key->null,c->applied.add(c.record()));
+        assertEquals(List.of(INVALID,ACCEPTED),results.stream().map(c->c.verdict().status()).toList());
+        assertEquals(1,applied.size());assertEquals(0,pending.size());
+    }
+
+    @Test void badDependencySignatureIsInvalidEvenWhenItsAdministratorVersionIsMissing() {
+        var a=KeyAnnouncement.issue(GROUP,secret(3),3,NOW,0,Crypto.blake2s(revocations.get(0).signedBytes()),digest(8),1,digest(9));
+        byte[] bad=a.encode();bad[bad.length-1]^=1;
+        var damaged=KeyAnnouncement.decode(bad);announcements.add(damaged);
+        expect(INVALID,wrap(damaged,certificate,NOW,1),null);
+    }
+    @Test void tooFarFutureInnerIsInvalidBeforeTheMissingOuterVersion() {
+        var a=announce(3,NOW+ManagedVerifier.FUTURE_SKEW_MILLIS+1);
+        var candidate=ManagedDhtRecord.issue(GROUP,secret(3),a,1,1,digest(9),NOW);
+        expect(INVALID,candidate,null);
+    }
+    @Test void retryRemovesDuplicateWithoutCallingTheApplication() {
+        var a=announce(3,NOW);var record=wrap(a,certificate,NOW,1);announcements.clear();
+        var pending=new ManagedPending(clock);assertTrue(pending.offer(record,verifier.judge(record,null)));
+        announcements.add(a);
+        var resolved=pending.retry(verifier,key->record,c->fail());
+        assertEquals(DUPLICATE,resolved.get(0).verdict().status());assertEquals(0,pending.size());assertEquals(0,pending.bytes());
+    }
+    @Test void pendingRevocationCandidatesUseTheirInnerRankBeforeArrivalOrder() {
+        var low=ManagedDhtRecord.issue(DhtKeys.LATEST_REVOCATIONS,GROUP,secret(1),AdminRecords.list(AdminRecords.Kind.REVOCATIONS,GROUP,1,NOW,List.of(),secret(1)),1,0,adminDigest(),NOW,null);
+        var high=ManagedDhtRecord.issue(DhtKeys.LATEST_REVOCATIONS,GROUP,secret(1),AdminRecords.list(AdminRecords.Kind.REVOCATIONS,GROUP,2,NOW,List.of(),secret(1)),1,0,adminDigest(),NOW,null);
+        for(var order:List.of(List.of(low,high),List.of(high,low))){
+            var pending=new ManagedPending(clock);
+            for(var r:order)assertTrue(pending.offer(r,ManagedVerdict.NEEDS_ANNOUNCEMENT));
+            var held=new java.util.HashMap<DhtId,ManagedDhtRecord>();
+            var resolved=pending.retry(verifier,held::get,c->held.put(c.record().key(),c.record()));
+            assertEquals(List.of(ACCEPTED,OLD),resolved.stream().map(c->c.verdict().status()).toList());
+            assertEquals(2,held.get(high.key()).version());assertEquals(0,pending.size());
+        }
+    }
+
 }

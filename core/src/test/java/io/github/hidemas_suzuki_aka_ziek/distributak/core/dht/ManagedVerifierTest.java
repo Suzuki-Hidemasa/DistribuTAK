@@ -286,4 +286,11 @@ class ManagedVerifierTest {
         var record=ManagedDhtRecord.issue(DhtKeys.WRAPPED_KEY,GROUP,secret(1),announcement,1,0,digestAt(0),NOW,ManagedDhtRecordTest.certificate());
         expect(INVALID,judge(record,null));
     }
+    @Test void aRevocationFromANewAdministratorWaitsForItsMissingList() {
+        var next=list(1,NOW-100,1,1,2,3);
+        var candidate=ManagedDhtRecord.issue(DhtKeys.LATEST_REVOCATIONS,GROUP,secret(3),revocationList(1,NOW,3,1),1,1,Crypto.blake2s(next.signedBytes()),NOW,null);
+        expect(NEEDS_VERSION,judge(ManagedDhtRecord.verifyStructure(candidate.encode(),GROUP),null));
+        assertTrue(state.acceptAdministrators(next,v->fail()));expect(ACCEPTED,judge(candidate,null));
+    }
+
 }

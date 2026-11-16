@@ -34,7 +34,11 @@ public final class ManagedDhtRecord {
     private final byte[] payload,signature,encoded;
     private AdminRecords.Record decodedInner;
     private KeyAnnouncement decodedAnnouncement;
-    /** 全体の大きさで選ぶ運び方。 / Transport selected by the complete encoded size. */
+    /**
+     * 全体の大きさで選ぶ運び方。
+     * <p>
+     * Transport selected by the complete encoded size.
+     */
     public enum Transport { STORE, TRANSFER }
     private ManagedDhtRecord(Body body,byte[] payload,byte[] signature) {
         this.body=body;this.payload=payload.clone();this.signature=signature.clone();
@@ -103,7 +107,11 @@ public final class ManagedDhtRecord {
         byte[] payload=canonical(body);
         return new ManagedDhtRecord(body,payload,SignaturePurpose.DHT_MANAGEMENT.sign(adminSecret,payload));
     }
-    /** 告知の外側を作って署名する。 / Builds and signs the outer layer of an announcement. */
+    /**
+     * 告知の外側を作って署名する。
+     * <p>
+     * Builds and signs the outer layer of an announcement.
+     */
     public static ManagedDhtRecord issue(byte[] group,byte[] adminSecret,KeyAnnouncement inner,long publicationSeq,
                                           long adminVersion,byte[] adminDigest,long signedAt) {
         length(group,32);length(adminSecret,32);length(adminDigest,32);
@@ -189,7 +197,11 @@ public final class ManagedDhtRecord {
     /** 通常の STORE に載る大きさか。 / Whether the record fits an ordinary STORE. */
     public boolean fitsStore(){return encoded.length<=MAX_STORE_BYTES;}
     public Transport transport(){return fitsStore()?Transport.STORE:Transport.TRANSFER;}
-    /** 種類 6 の検査済みの告知。 / The checked announcement for kind 6. */
+    /**
+     * 種類 6 の検査済みの告知。
+     * <p>
+     * The checked announcement for kind 6.
+     */
     public KeyAnnouncement announcement(){
         if(body.kind!=DhtKeys.KEY_ANNOUNCEMENT)return null;
         if(decodedAnnouncement==null)decodedAnnouncement=KeyAnnouncement.decode(body.inner);
