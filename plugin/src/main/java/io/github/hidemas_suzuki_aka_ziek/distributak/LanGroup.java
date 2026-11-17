@@ -21,6 +21,9 @@ final class LanGroup implements AutoCloseable {
     byte[] managementDigest;
     ManagementState management;
     boolean storageBlocked;
+    // 停止印を確かめられないことを表示する。保存形式には足さない。
+    // Reports an unverifiable stop marker without changing the stored format.
+    boolean invalidStopMarker;
     CorePersistenceCoordinator.RecoveryRequirement recoveryRequirement;
     /** この端末が DHT に出した記録の版。0 以上で、Long.MAX_VALUE-1 を上限とする（04 の 8.3）。他人の記録は保存しない。 */
     long dhtLocalVersion;

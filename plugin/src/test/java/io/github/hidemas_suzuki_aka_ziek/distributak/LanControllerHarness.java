@@ -28,6 +28,9 @@ final class LanControllerHarness implements AutoCloseable {
     static final class Ui implements LanController.Ui {
         volatile long epoch;boolean front=true,sensitive;int qrs;byte[] pixels;LanController.Status last;
         boolean failQr,failRender,failHide;int renders,hides;byte[] transferred;
+        Object confirmation;int confirmationCount,confirmations;
+        public void confirmUnknown(Object token,int count){confirmation=token;confirmationCount=count;confirmations++;}
+        public void hideManagementConfirmation(){confirmation=null;}
         public void render(LanController.Status status){renders++;if(failRender)throw new IllegalStateException("private UI detail");last=status;}
         public void qr(byte[] image){transferred=image;if(failQr)throw new IllegalStateException("private QR detail");qrs++;sensitive=true;Crypto.wipe(pixels);pixels=image.clone();Crypto.wipe(image);}
         public void hideSensitive(){hides++;epoch++;sensitive=false;Crypto.wipe(pixels);pixels=null;if(failHide)throw new IllegalStateException("private cleanup detail");}
@@ -80,7 +83,21 @@ final class LanControllerHarness implements AutoCloseable {
         void enableSix(){managementFiles=new VersionSixStorageTest.Files();stopMarker=new StopMarkerTest.Disk();}
         GroupStateStorage managedStorage(){state.fail=failSave;return managementFiles==null?groupStorage():new GroupStateStorage(envelope,state,source(state),settings,settings,v->{},managementFiles,stopMarker.marker());}
         public void prepareNetwork(LanGroup group)throws Exception{managedStorage().prepareNetwork(group);}
-        public CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){return managedStorage().persistenceHooks(group);}
+        Runnable beforeCandidateSave;
+        java.util.function.Consumer<AdminRecordStore.Snapshot> afterCandidateSave;
+        int candidateSaves;
+        public CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){
+            var delegate=managedStorage().persistenceHooks(group);
+            if(beforeCandidateSave==null&&afterCandidateSave==null)return delegate;
+            return new CorePersistenceCoordinator.PersistenceHooks(){
+                public void save(AdminRecordStore.Snapshot snapshot){
+                    if(beforeCandidateSave!=null)beforeCandidateSave.run();
+                    delegate.save(snapshot);candidateSaves++;
+                    if(afterCandidateSave!=null)afterCandidateSave.accept(snapshot);
+                }
+                public void stopped(CorePersistenceCoordinator.StopReason reason){delegate.stopped(reason);}
+            };
+        }
         public LanGroup load(Clock clock)throws Exception {if(loadFailure!=null)throw loadFailure;return erased?null:managedStorage().load(loadClock==null?clock:loadClock);}
         public void save(LanGroup group)throws Exception {managedStorage().save(group);}
         int directorySaves;Runnable afterDirectory=()->{};
@@ -89,7 +106,8 @@ final class LanControllerHarness implements AutoCloseable {
         }
         public boolean largeState(){return state.value!=null&&state.value.length>512*1024;}
         boolean failLocalRenewal,failIssuedRenewal;
-        public boolean saveLocalRenewal(LanGroup group,AdminRecords.Record certificate)throws Exception{if(failLocalRenewal)throw new java.io.IOException("test save failure");return managedStorage().saveLocalRenewal(group,certificate);}
+        Runnable afterLocalRenewal=()->{};
+        public boolean saveLocalRenewal(LanGroup group,AdminRecords.Record certificate)throws Exception{if(failLocalRenewal)throw new java.io.IOException("test save failure");boolean saved=managedStorage().saveLocalRenewal(group,certificate);afterLocalRenewal.run();return saved;}
         public boolean saveIssuedRenewal(LanGroup group,byte[] id,byte[] certificate)throws Exception{if(failIssuedRenewal)throw new java.io.IOException("test save failure");return managedStorage().saveIssuedRenewal(group,id,certificate);}
         public boolean savePeer(LanGroup group,AdminRecords.Record certificate,InetSocketAddress address)throws Exception{return managedStorage().savePeer(group,certificate,address);}
         java.util.function.Consumer<LanGroup> beforeAcceptRejoined=previous->{};
@@ -194,6 +212,7 @@ final class LanControllerHarness implements AutoCloseable {
     LanControllerHarness(Disk existing)throws Exception {this(existing,CotPort.NONE);}
     LanControllerHarness(Disk existing,CotPort cot)throws Exception {this(existing,cot,System::nanoTime);}
     LanControllerHarness(Disk existing,CotPort cot,Clock clock)throws Exception {this(existing,cot,System::nanoTime,false,clock);}
+    LanControllerHarness(Disk existing,CotPort cot,java.util.function.LongSupplier nanos,Clock clock)throws Exception {this(existing,cot,nanos,false,clock);}
     LanControllerHarness(Disk existing,CotPort cot,java.util.function.LongSupplier nanos)throws Exception {this(existing,cot,nanos,false);}
     static LanControllerHarness realUdp()throws Exception{return new LanControllerHarness(null,CotPort.NONE,System::nanoTime,true);}
     private LanControllerHarness(Disk existing,CotPort cot,java.util.function.LongSupplier nanos,boolean realUdp)throws Exception {

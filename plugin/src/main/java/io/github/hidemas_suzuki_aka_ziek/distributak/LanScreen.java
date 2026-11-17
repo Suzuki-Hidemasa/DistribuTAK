@@ -21,11 +21,11 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
     private final Activity activity;
     private final Handler main=new Handler(Looper.getMainLooper());
     private final TextView state;
-    private final Button create,scan,invite,reinvite,connect,send,stop,portButton,erase,dhtRescan;
+    private final Button create,scan,invite,reinvite,connect,send,stop,portButton,erase,dhtRescan,removeUnknown;
     private final Button fenceTest,fenceOnlyTest,fenceBroadcastTest,fenceServersTest,fenceAnyTest,fenceTakServerTest;
     private final EditText port;
     private LanController controller;
-    private Dialog sensitive;
+    private Dialog sensitive,managementConfirmation;
     private ImageView qrView;
     private Bitmap bitmap;
     private QrCamera camera;
@@ -62,6 +62,7 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
         reinvite=button("相手を入り直させる",()->{hideSensitive();controller.showRejoinInvitation(controller.ticket(),Math.min(1024,mediaEdge()));});
         send=button("試験DATAを1回送る",()->controller.sendTest());stop=button("通信を止める",()->controller.disconnect());
         dhtRescan=button("DHTを探し直す",()->controller.rescanDht());
+        removeUnknown=button("対応のない管理者をすべて外す",()->controller.removeUnknown(controller.ticket()));
         fenceTest=CotFixtureControl.button(BuildConfig.DEBUG,()->button("架空のCoTで柵を確かめる",()->controller.debugFence()));
         fenceOnlyTest=CotFixtureControl.button(BuildConfig.DEBUG,()->button("架空のCoTで柵だけを確かめる",()->controller.debugFenceOnly()));
         fenceBroadcastTest=CotFixtureControl.button(BuildConfig.DEBUG,()->button("架空のCoTを broadcast で送らせる",()->controller.debugFenceSend(CotPort.Send.BROADCAST)));
@@ -91,12 +92,14 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
         }return null;
     }
     @Override public void render(LanController.Status status) {
-        if(closed)return;last=status;state.setText(status.text);boolean usable=status.ready&&!status.busy;
+        if(closed)return;last=status;state.setText(status.text);boolean usable=status.ready&&status.operationsReady&&!status.busy;
         create.setEnabled(usable&&status.wifi&&StoreRecovery.canCreate(status.member,status.erasing));scan.setEnabled(usable&&status.wifi&&(StoreRecovery.canJoin(status.member)||status.rejoin));
         reinvite.setEnabled(usable&&status.wifi&&status.reinvite);
         invite.setEnabled(usable&&status.wifi&&status.admin);connect.setEnabled(usable&&status.wifi&&status.member);
         send.setEnabled(usable&&status.wifi&&status.member&&status.running);stop.setEnabled(usable&&status.running);
         dhtRescan.setEnabled(usable&&status.wifi&&status.running&&status.dht);
+        removeUnknown.setVisibility(status.unknown>0?View.VISIBLE:View.GONE);
+        removeUnknown.setEnabled(usable&&status.wifi&&status.running&&status.unknown>0);
         if(fenceTest!=null)fenceTest.setEnabled(usable&&status.running);
         if(fenceOnlyTest!=null)fenceOnlyTest.setEnabled(usable&&status.running);
         if(fenceBroadcastTest!=null)fenceBroadcastTest.setEnabled(usable&&status.running);
@@ -106,6 +109,21 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
         portButton.setEnabled(usable&&!status.running);port.setEnabled(usable&&!status.running);
         if(!port.hasFocus()&&status.port!=0)port.setText(Integer.toString(status.port));erase.setEnabled(!status.busy);
         if(!status.wifi)hideSensitive();
+    }
+    @Override public void confirmUnknown(Object token,int count){
+        if(!foreground()) {controller.cancelManagement();return;}
+        hideManagementConfirmation();
+        var next=new AlertDialog.Builder(context).setTitle("対応のない管理者をすべて外しますか")
+                .setMessage("対象: "+count+" 件。切り替えを確かめてから全員を外します。")
+                .setNegativeButton("戻る",(dialog,which)->controller.cancelManagement())
+                .setPositiveButton("すべて外す",(dialog,which)->{hideManagementConfirmation();controller.confirmUnknown(token);}).create();
+        managementConfirmation=next;
+        next.setOnCancelListener(dialog->controller.cancelManagement());
+        next.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);next.show();
+    }
+    @Override public void hideManagementConfirmation(){
+        Dialog previous=managementConfirmation;managementConfirmation=null;
+        if(previous!=null){previous.setOnCancelListener(null);previous.dismiss();}
     }
     private Dialog dialog(LinearLayout content) {
         Dialog dialog=new Dialog(context);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);dialog.setContentView(content);
@@ -196,6 +214,7 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
     }
     void setVisible(boolean visible){this.visible=visible;if(!visible)hideSensitive();}
     @Override public void hideSensitive() {
+        if(managementConfirmation!=null){hideManagementConfirmation();if(controller!=null)controller.cancelManagement();}
         sensitiveGeneration++;permissionPending=false;permissionTicket=null;clearSensitive();
     }
     private void clearSensitive(){
