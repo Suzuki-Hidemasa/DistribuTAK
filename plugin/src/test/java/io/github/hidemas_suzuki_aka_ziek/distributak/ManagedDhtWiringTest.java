@@ -43,15 +43,15 @@ public class ManagedDhtWiringTest {
         }}
         public void close(){a.close();b.close();p.close();}
     }
-    @Test public void initialJoinKeepsDiscoveryDhtAndManagementStartsOnReconnect()throws Exception{
+    @Test public void initialJoinStartsManagementAndReconnectRetainsThatCapability()throws Exception{
         try(var admin=new LanControllerHarness();var member=new LanControllerHarness()){
             admin.create();member.beginJoin(admin);
             LanControllerHarness.until(()->member.ui.last.member&&admin.logs.contains("LAN_MEMBER_ISSUED"),admin,member);
             member.drain();var initial=(LanDht)LanControllerHarness.field(member.controller,"dht");
             assertNotNull(initial);assertTrue(initial.active());
-            var config=(LanDht.Config)LanControllerHarness.field(initial,"cfg");assertNull(config.management);
-            assertNull(LanControllerHarness.field(member.controller,"persistence"));
-            assertNull(LanControllerHarness.field(member.controller,"recovery"));assertNull(LanControllerHarness.field(member.controller,"roster"));
+            var config=(LanDht.Config)LanControllerHarness.field(initial,"cfg");assertNotNull(config.management);
+            assertNotNull(LanControllerHarness.field(member.controller,"persistence"));
+            assertNotNull(LanControllerHarness.field(member.controller,"recovery"));assertNotNull(LanControllerHarness.field(member.controller,"roster"));
             member.controller.disconnect();member.drain();member.controller.connect();member.drain();
             var connected=(LanDht)LanControllerHarness.field(member.controller,"dht");assertNotNull(connected);
             assertNotNull(((LanDht.Config)LanControllerHarness.field(connected,"cfg")).management);

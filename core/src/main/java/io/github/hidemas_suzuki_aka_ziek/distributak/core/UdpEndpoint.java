@@ -391,15 +391,103 @@ public final class UdpEndpoint implements AutoCloseable {
             }finally{Crypto.wipe(active);stopIfSessionsClosed();}
         }
     }
+    /**
+     * 端点、sessionsの順にロックし、送出直前に共通の許可を確かめる。
+     * <p>
+     * Locks the endpoint before sessions and checks shared permission immediately before emission.
+     */
+    public boolean sendIfSession(byte[] id,byte[] sessionId,byte[] plaintext,CorePersistenceCoordinator.Operation operation){
+        synchronized(lock){
+            return !closed&&sessions!=null&&sessions.execute(operation,()->sendIfSession(id,sessionId,plaintext));
+        }
+    }
+    /**
+     * 通常の自動再接続を、限定復旧で許す握手と分けて判定する。
+     * <p>
+     * Checks normal automatic reconnection separately from the handshakes allowed during limited recovery.
+     */
+    public boolean startIfPermitted(byte[] peer,CorePersistenceCoordinator.Operation operation){
+        synchronized(lock){
+            return !closed&&sessions!=null&&sessions.execute(operation,()->{start(peer);return true;});
+        }
+    }
+    /**
+     * 発見による開始も、送信直前に共通の許可を確かめる。
+     * <p>
+     * Checks shared permission immediately before a discovery handshake is sent.
+     */
+    public boolean startDiscoveredIfPermitted(byte[] peer,byte[] handshake,InetSocketAddress address){
+        synchronized(lock){
+            return !closed&&sessions!=null&&sessions.execute(CorePersistenceCoordinator.Operation.RECONNECT,
+                    ()->{startDiscovered(peer,handshake,address);return true;});
+        }
+    }
+    /**
+     * 管理者始動のセッションを示すFIRSTにも通常の再接続の許可を使う。
+     * <p>
+     * Uses normal reconnection permission for FIRST on a peer initiated session.
+     */
+    public boolean startIfPermitted(byte[] peer,byte[] session){
+        synchronized(lock){
+            return !closed&&sessions!=null&&sessions.execute(CorePersistenceCoordinator.Operation.RECONNECT,()->start(peer,session));
+        }
+    }
+    /**
+     * 保存前の更新検査を、端点からセッションの順にロックして行う。
+     * <p>
+     * Validates renewal before saving while locking the endpoint before the sessions.
+     */
+    public boolean validateRenewalIfPermitted(AdminRecords.Record certificate){
+        return renewalValidationIfPermitted(certificate)==RenewalValidation.UPDATE;
+    }
+    /**
+     * 更新の拒否と、検査済みで更新が不要な場合を分ける。
+     * <p>
+     * Distinguishes denied renewal from a validated certificate that needs no update.
+     */
+    public enum RenewalValidation {DENIED,UNCHANGED,UPDATE}
+    /**
+     * 許可と更新の要否を、同じ端点とセッションのロックで検査する。
+     * <p>
+     * Checks permission and the need for renewal under the same endpoint and session locks.
+     */
+    public RenewalValidation renewalValidationIfPermitted(AdminRecords.Record certificate){
+        synchronized(lock){
+            if(closed||sessions==null)return RenewalValidation.DENIED;
+            RenewalValidation[] result={RenewalValidation.DENIED};
+            sessions.execute(CorePersistenceCoordinator.Operation.RENEWAL,()->{
+                result[0]=validateLocalCertificateRenewal(certificate)?RenewalValidation.UPDATE:RenewalValidation.UNCHANGED;
+                return true;
+            });
+            return result[0];
+        }
+    }
+    /**
+     * 保存後にも許可を確かめて証明書を公開する。
+     * <p>
+     * Checks permission again before publishing a saved certificate.
+     */
+    public boolean updateRenewalIfPermitted(AdminRecords.Record certificate){
+        synchronized(lock){
+            return !closed&&sessions!=null&&sessions.execute(CorePersistenceCoordinator.Operation.RENEWAL,
+                    ()->{updateLocalCertificate(certificate);return true;});
+        }
+    }
     public boolean acceptRevocations(AdminRecords.Record record) {
-        synchronized(lock) { open();member();try { return admin.acceptRevocations(record); } finally { refreshAndCheckClosed(); } }
+        synchronized(lock) { open();member();synchronized(sessions){
+            if(!sessions.permitsAdministration())return false;
+            try { return admin.acceptRevocations(record); } finally { refreshAndCheckClosed(); }
+        }}
     }
     public boolean acceptAdministrators(AdminRecords.Record record,LongConsumer missingVersion) {
         // 呼び出し元の受け口をロックの外で呼ぶ。
         long[] missing={-1};boolean accepted;
         synchronized(lock) {
-            open();member();try { accepted=admin.acceptAdministrators(record,value->missing[0]=value); }
-            finally { refreshAndCheckClosed(); }
+            open();member();synchronized(sessions){
+                if(!sessions.permitsAdministration())return false;
+                try { accepted=admin.acceptAdministrators(record,value->missing[0]=value); }
+                finally { refreshAndCheckClosed(); }
+            }
         }
         if(missing[0]>=0) missingVersion.accept(missing[0]);return accepted;
     }

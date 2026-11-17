@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-package io.github.hidemas_suzuki_aka_ziek.distributak;
+package io.github.hidemas_suzuki_aka_ziek.distributak.core;
 
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
@@ -9,12 +9,12 @@ import java.security.SecureRandom;
  * <p>
  * Issues distinct operation identifiers for normal sends and recovery requests within one transport lifetime.
  */
-final class ManagementOperations {
+public final class ManagementOperations {
     private final byte[] prefix=new byte[8];
     private long counter;
     private boolean exhausted;
-    ManagementOperations(SecureRandom random){random.nextBytes(prefix);}
-    byte[] next(){
+    public ManagementOperations(SecureRandom random){random.nextBytes(prefix);}
+    public synchronized byte[] next(){
         if(exhausted)throw new IllegalStateException("Management operation identifiers exhausted");
         byte[] operation=ByteBuffer.allocate(16).put(prefix).putLong(counter).array();
         if(counter==Long.MAX_VALUE)exhausted=true;else counter++;

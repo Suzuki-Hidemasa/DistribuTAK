@@ -19,6 +19,7 @@ import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.SessionManager;
+import io.github.hidemas_suzuki_aka_ziek.distributak.core.CorePersistenceCoordinator;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.ManagementEnvelopeFields;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.UdpEndpoint;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.AuthenticatedPeer;
@@ -116,6 +117,7 @@ final class LanDht implements DhtLink {
         Function<DhtId,DhtWire.NodeContact> storedContact=id->null;
         Consumer<String> log=s->{};
         ManagedDhtExchange management;
+        CorePersistenceCoordinator coordinator;
     }
 
     private static final class Handshake {
@@ -200,6 +202,9 @@ final class LanDht implements DhtLink {
     boolean active() {
         return !closed&&!disabled;
     }
+    private boolean permits(CorePersistenceCoordinator.Operation operation){
+        return cfg.coordinator==null||cfg.coordinator.permits(operation);
+    }
 
     int routingSize() {
         return active()?node.routing().size():0;
@@ -276,7 +281,7 @@ final class LanDht implements DhtLink {
 
     /** 受信用: 返事を受ける番地が同じサブネットの IPv4 のときだけ許す。受信スレッドから呼ばれるので止まらない・書き換えない。 */
     boolean allowsReply(InetSocketAddress address) {
-        if(closed||disabled) {
+        if(closed||disabled||!permits(CorePersistenceCoordinator.Operation.RECONNECT)) {
             return false;
         }
         try {
@@ -369,7 +374,7 @@ final class LanDht implements DhtLink {
 
     // ---- 1 秒おきに進める ----
     void step() {
-        if(closed||disabled) {
+        if(closed||disabled||!permits(CorePersistenceCoordinator.Operation.DHT_READ)) {
             return;
         }
         try {
@@ -458,7 +463,10 @@ final class LanDht implements DhtLink {
             log("DHT_VERSION_RESERVE_FAILED");
             return;
         }
-        byte[] signed=cfg.issuer.issue(version,wallMillis()).encode();
+        if(!permits(CorePersistenceCoordinator.Operation.DHT_WRITE))return;
+        DiscoveryRecord record=cfg.issuer.issue(version,wallMillis());
+        if(record==null)return;
+        byte[] signed=record.encode();
         if(publisher.publish(signed,now)) {
             publishAt=now+HOUR+jitter();
         } else {
@@ -558,7 +566,7 @@ final class LanDht implements DhtLink {
      * 壁時計が読めない（負）間は、DHT の線でも何も書き換えずに捨てて true を返す（拒否ではないので数えない）。
      */
     boolean receive(byte[] peer,byte[] session,byte[] plain) {
-        if(closed||disabled) {
+        if(closed||disabled||!permits(CorePersistenceCoordinator.Operation.DHT_WRITE)) {
             return false;
         }
         try {
@@ -621,7 +629,7 @@ final class LanDht implements DhtLink {
     }
 
     @Override public boolean send(byte[] peerId,byte[] sessionId,byte[] plaintext) {
-        return wire.send(peerId,sessionId,plaintext);
+        return permits(CorePersistenceCoordinator.Operation.TRANSFER)&&wire.send(peerId,sessionId,plaintext);
     }
 
     @Override public boolean releaseVolatile(byte[] peerId) {
@@ -666,6 +674,7 @@ final class LanDht implements DhtLink {
      * 結果は {@link #result()} の固定文。すぐ決まるものは返り値にも返す。待つときは null。
      */
     String press() {
+        if(!permits(CorePersistenceCoordinator.Operation.DHT_READ))return result;
         if(closed||disabled) {
             result=NO_PEER;
             return result;
@@ -706,7 +715,9 @@ final class LanDht implements DhtLink {
             log("DHT_VERSION_RESERVE_FAILED");
             return notFound();
         }
+        if(!permits(CorePersistenceCoordinator.Operation.DHT_WRITE))return shown(WAIT);
         DiscoveryRecord mine=cfg.issuer.issue(version,wallMillis());
+        if(mine==null)return shown(WAIT);
         byte[] signed=mine.encode();
         DhtId key=mine.key();
         long stored=mine.version();
@@ -817,7 +828,7 @@ final class LanDht implements DhtLink {
         }
 
         @Override public boolean send(byte[] peer,byte[] session,byte[] plain) {
-            return endpoint.sendIfSession(peer,session,plain);
+            return endpoint.sendIfSession(peer,session,plain,CorePersistenceCoordinator.Operation.TRANSFER);
         }
 
         @Override public boolean release(byte[] peer) {
@@ -825,7 +836,7 @@ final class LanDht implements DhtLink {
         }
 
         @Override public void start(byte[] node,byte[] handshakeKey,InetSocketAddress address) {
-            endpoint.startDiscovered(node,handshakeKey,address);
+            endpoint.startDiscoveredIfPermitted(node,handshakeKey,address);
         }
 
         @Override public long nextGeneration() {

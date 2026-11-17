@@ -313,10 +313,28 @@ final class LanGroup implements AutoCloseable {
         Crypto.wipe(removeRenewal(Crypto.blake2s(peerCertificate.field(0))));
         peerCertificate=null;peerAddress=null;revokedPeerForgotten=true;return true;
     }
+    // AdminStateを変えられない段では、予約の例外文だけをここで見分ける。
+    // Until AdminState can be changed, classify only its reservation message here.
+    private static final String RESERVED_CLOSE="Management persistence is reserved";
+    static boolean reservedClose(IllegalStateException failure){
+        if(RESERVED_CLOSE.equals(failure.getMessage()))return true;
+        throw failure;
+    }
+    boolean tryClose(){
+        try{if(state!=null)state.clear();}
+        catch(IllegalStateException failure){if(reservedClose(failure))return false;throw failure;}
+        eraseOwned();return true;
+    }
     @Override public void close() {
+        // 予約中の拒否を先に受け、所有する秘密を途中まで消さない。
+        // Check reservation refusal first so owned secrets are never partially erased.
+        if(state!=null)state.clear();
+        eraseOwned();
+    }
+    private void eraseOwned(){
         closed=true;Crypto.wipe(identitySecret);Crypto.wipe(handshakeSecret);Crypto.wipe(administratorSecret);Crypto.wipe(groupKey);
         for(byte[] renewal:pendingRenewals.values())Crypto.wipe(renewal);pendingRenewals.clear();
-        clearPendingPeer();if(state!=null)state.clear();peerCertificate=null;peerAddress=null;certificate=null;
+        clearPendingPeer();peerCertificate=null;peerAddress=null;certificate=null;
     }
     @Override public String toString(){return "LanGroup";}
 }

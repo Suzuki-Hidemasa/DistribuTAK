@@ -2,6 +2,7 @@
 package io.github.hidemas_suzuki_aka_ziek.distributak;
 
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.*;
+import io.github.hidemas_suzuki_aka_ziek.distributak.core.ManagementOperations;
 import java.time.Clock;
 import java.security.SecureRandom;
 import java.util.*;
@@ -43,7 +44,7 @@ final class RevocationRecovery implements AutoCloseable {
     }
     RevocationRecovery(LanGroup group,SessionManager sessions,CorePersistenceCoordinator coordinator,Clock clock,SecureRandom random,
                        java.util.function.Supplier<CorePersistenceCoordinator.PersistenceHooks> hooks,Transport transport){
-        this.group=group;this.sessions=sessions;this.coordinator=coordinator;this.clock=clock;this.operations=new ManagementOperations(random);this.transport=transport;this.hooks=hooks;
+        this.group=group;this.sessions=sessions;this.coordinator=coordinator;this.clock=clock;this.operations=coordinator.managementOperations(random);this.transport=transport;this.hooks=hooks;
         budget=new ManagementSendBudget(clock);
         sender=new ManagementPageSender(group.groupId,clock,budget,(p,s,w)->{
             if(!coordinator.permits(CorePersistenceCoordinator.Operation.REVOCATION_PAGE))return false;
@@ -123,7 +124,7 @@ final class RevocationRecovery implements AutoCloseable {
             public void save(AdminRecordStore.Snapshot snapshot){delegate.save(snapshot);}
             public void save(CorePersistenceCoordinator.PersistenceRequest request){delegate.save(request);}
             public void clear(CorePersistenceCoordinator.PersistenceRequest request){delegate.clear(request);}
-            public void stopped(CorePersistenceCoordinator.StopReason reason){if(delegate!=null)delegate.stopped(reason);}
+            public void stopped(CorePersistenceCoordinator.StopReason reason){group.storageBlocked=true;if(delegate!=null)delegate.stopped(reason);}
             public void selfRevoked(){if(delegate!=null)delegate.selfRevoked();}
         },receivedAt);
         if(result.status()==ManagementPageAssembler.Status.REJECTED||result.status()==ManagementPageAssembler.Status.CORRUPT){
