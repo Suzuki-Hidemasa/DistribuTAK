@@ -28,10 +28,5 @@ final class LanSupport {
     }
     static byte[] testData(){return "DT-LAN-TEST\u0001".getBytes(StandardCharsets.US_ASCII);}
     static boolean isTestData(byte[] bytes){return Crypto.equal(testData(),bytes);}
-    static String shortId(byte[] id) {
-        if(id.length!=32)throw new IllegalArgumentException("IDの長さが違います");
-        char[] out=new char[8];String alphabet="0123456789abcdef";
-        for(int i=0;i<4;i++){out[i*2]=alphabet.charAt((id[i]&255)>>>4);out[i*2+1]=alphabet.charAt(id[i]&15);}return new String(out);
-    }
-    static String receipt(long count,byte[] id){return "LAN_TEST_RX count="+count+" peer="+shortId(id);}
+    static String receipt(long count){return "LAN_TEST_RX count="+count;}
 }

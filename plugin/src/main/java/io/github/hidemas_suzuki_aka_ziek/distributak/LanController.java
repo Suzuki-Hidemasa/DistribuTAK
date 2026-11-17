@@ -254,8 +254,7 @@ final class LanController implements AutoCloseable {
     private void rememberPublicGroup() {
         if(group==null||releasePending)return;administrator=group.isAdministrator();savedMember=true;savedAdmin=group.isAdministrator()&&group.peerCertificate==null;
         storageStopped|=group.storageBlocked;invalidStopMarker|=group.invalidStopMarker;
-        publicGroup="\nグループ: "+LanSupport.shortId(group.groupId)+" 自分: "+LanSupport.shortId(group.id())
-                +"\n相手: "+(group.peerCertificate==null?"未登録":LanSupport.shortId(Crypto.blake2s(group.peerCertificate.field(0))));
+        publicGroup="\nグループ: 参加済み\n相手: "+(group.peerCertificate==null?"未登録":"登録済み");
         publicExpiry=group.certificate.expiresAt();publicRenewals=group.renewalCount;
         revokedPeerForgotten|=group.revokedPeerForgotten;
         if(group.pendingRenewalReason()==UdpEndpoint.CloseReason.INTERNAL_FAILURE)storageWarning="保存した証明書の更新を1件捨てました。次の更新で作り直します";
@@ -317,7 +316,7 @@ final class LanController implements AutoCloseable {
                         continue;
                     }
                     if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.COT_RECEIVE))continue;
-                    if(LanSupport.isTestData(packet.wire)){rx++;log(LanSupport.receipt(rx,packet.peer));}
+                    if(LanSupport.isTestData(packet.wire)){rx++;log(LanSupport.receipt(rx));}
                     else if(DhtWire.isDht(packet.wire)){
                         if(dht==null||!dht.receive(packet.peer,packet.session,packet.wire))reject++;
                         if(committedNotApplied){stopNetwork();continue;}

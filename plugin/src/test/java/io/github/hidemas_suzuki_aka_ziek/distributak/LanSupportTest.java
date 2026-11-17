@@ -26,7 +26,7 @@ public class LanSupportTest {
         byte[] bad=good.clone();bad[0]^=1;
         assertFalse(LanSupport.isTestData(bad));assertFalse(LanSupport.isTestData(new byte[0]));
         assertFalse(LanSupport.isTestData(Arrays.copyOf(good,good.length-1)));
-        assertEquals("LAN_TEST_RX count=1 peer=00000000",LanSupport.receipt(1,new byte[32]));
-        assertFalse(LanSupport.receipt(1,new byte[32]).contains("DT-LAN-TEST"));
+        assertEquals("LAN_TEST_RX count=1",LanSupport.receipt(1));
+        assertFalse(LanSupport.receipt(1).contains("DT-LAN-TEST"));
     }
 }
