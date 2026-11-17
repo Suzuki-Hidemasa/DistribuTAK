@@ -29,6 +29,10 @@ final class GroupStateStorage {
         int size=six.saveDirectory(group,target,directory,labels);writeSettings(group);observeSize(size);six.cleanup(group);
     }
     void prepareNetwork(LanGroup group)throws Exception{if(six!=null)six.prepareNetwork(group);}
+    void saveMembership(LanGroup group,io.github.hidemas_suzuki_aka_ziek.distributak.core.AdminRecordStore.Snapshot snapshot,byte[] secret)throws Exception{
+        if(six==null)throw new IllegalStateException("管理保存先がありません");
+        int size=six.saveMembership(group,target,snapshot,secret);writeSettings(group);observeSize(size);six.cleanup(group);
+    }
     private void diagnostic(String fixed){try{log.accept(fixed);}catch(RuntimeException ignored){}}
     LanGroup load(Clock clock)throws Exception {
         if(!source.exists())return null;

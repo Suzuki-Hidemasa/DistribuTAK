@@ -11,6 +11,12 @@ public final class GroupAdministration implements AutoCloseable {
     public static final int MAX_PENDING=32;
     public static final long PENDING_NANOS=600_000_000_000L;
     @FunctionalInterface public interface Saver {void save(AdminRecordStore.Snapshot snapshot);}
+    /**
+     * 保存の間だけ秘密の複製を渡す。保存後に配列を保持しない。
+     * <p>
+     * Receives a temporary secret copy only during persistence. Do not retain the array afterwards.
+     */
+    @FunctionalInterface public interface MembershipSaver {void save(AdminRecordStore.Snapshot snapshot,byte[] secret);}
     @FunctionalInterface public interface Publisher {void publish(Candidate candidate);}
     @FunctionalInterface public interface CertificateSaver {void save(AdminRecords.Record certificate);}
     public enum Phase { PREPARE, REISSUE, CONFIRM, COMMIT, PUBLISH, COMPLETE, CANCELLED }
@@ -253,6 +259,28 @@ public final class GroupAdministration implements AutoCloseable {
     public synchronized Candidate received(AdminRecords.Record administrators,AdminRecords.Record revocations) {
         open();var checked=state.fork();checked.acceptAdministrators(administrators,v->{throw invalid();});checked.acceptRevocations(revocations);
         return new Candidate(this,checked,null,null);
+    }
+    /**
+     * 完全に一致する保留の秘密だけを保存位置で渡し、戻るときに複製を消す。
+     * <p>
+     * Exports only an exactly matching pending secret at the save position, wiping the copy on return.
+     */
+    public synchronized void persist(Candidate candidate,MembershipSaver saver,Publisher publisher){
+        Objects.requireNonNull(saver);
+        persist(candidate,snapshot->{
+            byte[] copy=new byte[0];
+            try{
+                expire();
+                for(var p:pending.values()){
+                    if(!p.outbound||p.secret==null)continue;
+                    var binding=candidate.administrators().binding(Crypto.ed25519Public(p.secret));
+                    if(binding!=null&&binding.state()==AdminBinding.State.BOUND&&Crypto.equal(binding.memberId(),member)
+                            &&Arrays.equals(binding.possessionProof(),p.message.encode())
+                            &&candidate.administrators().version()>p.version){copy=p.secret.clone();break;}
+                }
+                saver.save(snapshot,copy);
+            }finally{Crypto.wipe(copy);}
+        },publisher);
     }
     /** 失敗時は候補を再試行できる。公開の失敗は通信再開せず停止する。 */
     public synchronized void persist(Candidate candidate,Saver saver,Publisher publisher) {

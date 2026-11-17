@@ -28,8 +28,17 @@ final class LanControllerHarness implements AutoCloseable {
     static final class Ui implements LanController.Ui {
         volatile long epoch;boolean front=true,sensitive;int qrs;byte[] pixels;LanController.Status last;
         boolean failQr,failRender,failHide;int renders,hides;byte[] transferred;
+        final List<String> managementTexts=new ArrayList<>(),choiceLabels=new ArrayList<>();
         Object confirmation;int confirmationCount,confirmations;
         public void confirmUnknown(Object token,int count){confirmation=token;confirmationCount=count;confirmations++;}
+        public void confirmManagement(Object token,String title,String text){confirmation=token;confirmations++;managementTexts.add(title);managementTexts.add(text);}
+        Object naming,input;
+        public void namingWait(Object token){naming=token;}
+        public void inputLabel(Object token){input=token;}
+        Object choiceToken;java.util.List<LanController.NamedChoice> choices;
+        public void chooseManagement(Object token,String title,java.util.List<LanController.NamedChoice> values){
+            choiceToken=token;choices=values;managementTexts.add(title);for(var value:values)choiceLabels.add(value.label);
+        }
         public void hideManagementConfirmation(){confirmation=null;}
         public void render(LanController.Status status){renders++;if(failRender)throw new IllegalStateException("private UI detail");last=status;}
         public void qr(byte[] image){transferred=image;if(failQr)throw new IllegalStateException("private QR detail");qrs++;sensitive=true;Crypto.wipe(pixels);pixels=image.clone();Crypto.wipe(image);}
@@ -83,6 +92,10 @@ final class LanControllerHarness implements AutoCloseable {
         void enableSix(){managementFiles=new VersionSixStorageTest.Files();stopMarker=new StopMarkerTest.Disk();}
         GroupStateStorage managedStorage(){state.fail=failSave;return managementFiles==null?groupStorage():new GroupStateStorage(envelope,state,source(state),settings,settings,v->{},managementFiles,stopMarker.marker());}
         public void prepareNetwork(LanGroup group)throws Exception{managedStorage().prepareNetwork(group);}
+        Runnable afterMembership=()->{};
+        public void saveMembership(LanGroup group,AdminRecordStore.Snapshot snapshot,byte[] secret)throws Exception{
+            managedStorage().saveMembership(group,snapshot,secret);afterMembership.run();
+        }
         Runnable beforeCandidateSave;
         java.util.function.Consumer<AdminRecordStore.Snapshot> afterCandidateSave;
         int candidateSaves;

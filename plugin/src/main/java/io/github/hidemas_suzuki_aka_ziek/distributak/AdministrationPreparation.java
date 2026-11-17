@@ -24,8 +24,11 @@ final class AdministrationPreparation implements AutoCloseable {
     private final boolean invitation;
     private boolean begun,closed;
     AdministrationPreparation(GroupAdministration administration,SessionManager sessions,List<byte[]> removed,boolean invitation,Port port){
+        this(administration,sessions,removed,invitation,true,port);
+    }
+    AdministrationPreparation(GroupAdministration administration,SessionManager sessions,List<byte[]> removed,boolean invitation,boolean allUnknown,Port port){
         this.administration=administration;this.invitation=invitation;this.port=port;this.sessions=sessions;
-        preparation=invitation?administration.prepareInvitation(sessions):administration.prepareRemoval(sessions,removed,true);
+        preparation=invitation?administration.prepareInvitation(sessions):administration.prepareRemoval(sessions,removed,allUnknown);
         for(var entry:administration.directory().validRecipients())if(sessions.verifiedSession(entry.memberId())!=null)peers.add(entry.memberId());
     }
     void begin(){if(closed||begun)throw new IllegalStateException("操作は取り消しました");preparation.reissue(port::own);begun=true;}

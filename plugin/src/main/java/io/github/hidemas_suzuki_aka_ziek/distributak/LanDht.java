@@ -54,6 +54,10 @@ import io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.LocalNetwork;
  * 例外が出たらこの保持役だけ止める（通信全体は止めない）。止めたあとは何も送らず、何も受けない。
  */
 final class LanDht implements DhtLink {
+    io.github.hidemas_suzuki_aka_ziek.distributak.core.KeyRotationCoordinator.Result manualRotation(List<byte[]> revoked){
+        if(!active()||cfg.management==null)throw new IllegalStateException("今は操作できません");
+        return cfg.management.manual(revoked);
+    }
     static final long SECOND=1_000_000_000L;
     static final long HOUR=3_600L*SECOND;
     static final long PRESS_FLOOR=60L*SECOND;

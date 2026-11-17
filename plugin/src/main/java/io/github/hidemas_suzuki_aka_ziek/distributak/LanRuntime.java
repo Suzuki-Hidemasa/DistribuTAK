@@ -63,6 +63,9 @@ final class LanRuntime {
             throw new UnsupportedOperationException("名簿保存の口がありません");
         }
         default void prepareNetwork(LanGroup group)throws Exception{}
+        default void saveMembership(LanGroup group,io.github.hidemas_suzuki_aka_ziek.distributak.core.AdminRecordStore.Snapshot snapshot,byte[] secret)throws Exception{
+            throw new UnsupportedOperationException("付与の保存の口がありません");
+        }
         default boolean largeState(){return false;}
         default boolean saveIssuedRenewal(LanGroup group,byte[] peerId,byte[] certificate)throws Exception {
             throw new UnsupportedOperationException("発行済み更新の保存の口がありません");

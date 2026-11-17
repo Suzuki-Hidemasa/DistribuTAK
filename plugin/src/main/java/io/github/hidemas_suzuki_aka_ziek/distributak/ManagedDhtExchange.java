@@ -50,6 +50,12 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
     DhtRecordBudget budget(){return budget;}
     TransferResources resources(){return coordinator.transferResources();}
     KeyRotationCoordinator rotation(){return rotation;}
+    private java.util.function.Predicate<AdminRecords.Record> beforeAdministrators=value->false;
+    void beforeAdministrators(java.util.function.Predicate<AdminRecords.Record> value){beforeAdministrators=value;}
+    KeyRotationCoordinator.Result manual(List<byte[]> revoked){
+        if(!allowed()||rotation==null)throw new IllegalStateException("今は操作できません");
+        return rotation.manual(revoked,recipients(),storage.persistenceHooks(group));
+    }
     void transport(RevocationRecovery value){transport=value;value.beforeSending(this::refreshSavedDelivery);}
     private void lookup(DhtId key){if(!lookups.containsKey(key)&&lookups.size()<8)lookups.put(key,new Lookup(deadlines.millis()));}
     ManagementPageAck receiveAnnouncement(byte[] peer,byte[] session,byte[] wire,long receivedAt){
@@ -270,7 +276,7 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
         if(value.kind()==DhtKeys.LATEST_ADMINS||value.kind()==DhtKeys.ADMIN_HISTORY){
             var current=group.state.administrators();
             if(value.inner().version()>current.version()||value.inner().version()==current.version()&&AdminRecords.compare(value.inner(),current)>0){
-                if(!coordinator.receiveAdministrators(value.inner(),storage.persistenceHooks(group))){
+                if(!beforeAdministrators.test(value.inner())&&!coordinator.receiveAdministrators(value.inner(),storage.persistenceHooks(group))){
                     if(coordinator.state()==CorePersistenceCoordinator.State.RUNNING)throw new ManagedDhtStore.PersistenceDeferred();
                     throw new IllegalStateException("Administrator persistence stopped");
                 }

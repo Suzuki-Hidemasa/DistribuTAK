@@ -167,6 +167,9 @@ final class AndroidStateStore implements LanRuntime.Storage {
         if(group.port!=port)throw new SecurityException("ポートの記録が違います");groups.saveDirectory(group,directory,labels);
     }
     public void prepareNetwork(LanGroup group)throws Exception{groups.prepareNetwork(group);}
+    public void saveMembership(LanGroup group,io.github.hidemas_suzuki_aka_ziek.distributak.core.AdminRecordStore.Snapshot snapshot,byte[] secret)throws Exception{
+        if(group.port!=port)throw new SecurityException("ポートの記録が違います");groups.saveMembership(group,snapshot,secret);
+    }
     public boolean largeState(){return groups.largeState();}
     public boolean saveIssuedRenewal(LanGroup group,byte[] peerId,byte[] certificate)throws Exception {
         if(group.port!=port)throw new SecurityException("ポートの記録が違います");return groups.saveIssuedRenewal(group,peerId,certificate);
