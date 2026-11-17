@@ -1,9 +1,11 @@
 ---
 id: DTAK-18
 title: 旧保存（版 5）の停止印が壊れているとき、起動後に CLEAR へ作り直されて通信が開く（DTAK-9 9a から持ち越し）
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-17 08:33'
+updated_date: '2026-11-17 08:40'
 labels:
   - security
 dependencies: []

@@ -347,9 +347,72 @@ public class VersionSixStorageTest {
     }
     @Test public void partialInitialRegionCanBeReallocatedUsingVerifiedLegacyState()throws Exception{
         try(var g=group()){
-            f.storage().save(g);byte[] original=f.state.value.clone();marker.bytes=new byte[256];marker.bytes[0]=68;
+            f.storage().save(g);byte[] original=f.state.value.clone();marker.bytes=new byte[256];
             storage().prepareNetwork(g);assertEquals(StopMarker.Status.CLEAR,marker.marker().inspect().status());assertArrayEquals(original,f.state.value);
             storage().save(g);try(var loaded=storage().load(StorageGroupTest.CLOCK)){assertFalse(loaded.storageBlocked);}
+        }
+    }
+    @Test public void nonzeroPartialLegacyMarkerCannotBeReinitializedByStartupOrSave()throws Exception{
+        for(int length:new int[]{1,128,255,256,257}){
+            try(var g=group()){
+                f.storage().save(g);byte[] original=f.state.value.clone();marker.bytes=new byte[length];marker.bytes[0]=68;
+                byte[] invalid=marker.bytes.clone();int writes=marker.writes;
+                try(var loaded=storage().load(StorageGroupTest.CLOCK)){
+                    assertTrue(loaded.storageBlocked);assertTrue(loaded.invalidStopMarker);assertNull(loaded.recoveryRequirement);
+                    assertThrows(IOException.class,()->storage().prepareNetwork(loaded));
+                    assertThrows(IllegalStateException.class,()->storage().save(loaded));
+                }
+                assertThrows(IOException.class,()->storage().prepareNetwork(g));
+                assertThrows(IOException.class,()->storage().save(g));
+                assertEquals(writes,marker.writes);assertArrayEquals(invalid,marker.bytes);assertArrayEquals(original,f.state.value);
+            }
+        }
+    }
+    @Test public void loneActiveLegacySlotCannotBeReinitialized()throws Exception{
+        for(int offset:new int[]{0,StopMarker.SLOT_BYTES}){
+            marker.bytes=null;
+            try(var g=group()){
+                f.storage().save(g);storage().prepareNetwork(g);
+                marker.marker().active(new StopMarker.Target(g.saveSeq,1,new byte[32],new byte[32],StopMarker.RECEIVED));
+                marker.bytes[offset]^=1;byte[] invalid=marker.bytes.clone();int writes=marker.writes;
+                try(var loaded=storage().load(StorageGroupTest.CLOCK)){
+                    assertTrue(loaded.storageBlocked);assertTrue(loaded.invalidStopMarker);assertNull(loaded.recoveryRequirement);
+                    assertThrows(IOException.class,()->storage().prepareNetwork(loaded));
+                    assertThrows(IllegalStateException.class,()->storage().save(loaded));
+                }
+                assertThrows(IOException.class,()->storage().prepareNetwork(g));
+                assertThrows(IOException.class,()->storage().save(g));
+                assertEquals(writes,marker.writes);assertArrayEquals(invalid,marker.bytes);
+            }
+        }
+    }
+    @Test public void loneClearWithDifferentVersionStopsLegacyLoad()throws Exception{
+        rejectLegacyLoneClearMismatch(true);
+    }
+    @Test public void loneClearWithDifferentRevocationDigestStopsLegacyLoad()throws Exception{
+        rejectLegacyLoneClearMismatch(false);
+    }
+    private void rejectLegacyLoneClearMismatch(boolean version)throws Exception{
+        for(int offset:new int[]{0,StopMarker.SLOT_BYTES}){
+            marker.bytes=null;
+            try(var g=group()){
+                f.storage().save(g);storage().prepareNetwork(g);
+                var original=marker.marker().inspect().target();byte[] digest=original.revocationDigest();if(!version)digest[0]^=1;
+                var different=new StopMarker.Target(original.saveSeq(),original.requiredVersion()+(version?1:0),
+                        original.stateDigest(),digest,original.reason());
+                marker.marker().clear(different);marker.bytes[offset]^=1;
+                byte[] before=marker.bytes.clone(),state=f.state.value.clone(),settings=f.settings.value.clone();int writes=marker.writes;
+                assertEquals(StopMarker.Status.INVALID,marker.marker().inspect().status());
+                try(var loaded=storage().load(StorageGroupTest.CLOCK)){
+                    assertTrue(loaded.storageBlocked);assertTrue(loaded.invalidStopMarker);assertNull(loaded.recoveryRequirement);
+                    assertThrows(IOException.class,()->storage().prepareNetwork(loaded));
+                    assertThrows(IllegalStateException.class,()->storage().save(loaded));
+                }
+                assertThrows(IOException.class,()->storage().prepareNetwork(g));
+                assertThrows(IOException.class,()->storage().save(g));
+                assertArrayEquals(before,marker.bytes);assertEquals(writes,marker.writes);
+                assertArrayEquals(state,f.state.value);assertArrayEquals(settings,f.settings.value);
+            }
         }
     }
     @Test public void receivingRevocationAfterFailedInitialAllocationStopsAllSessions()throws Exception{
