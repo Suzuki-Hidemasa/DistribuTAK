@@ -101,13 +101,11 @@ public final class DhtTransfers {
     private final DhtTransferSink sink;
     private final ManagedTransferSink managedSink;
     private final ValueGate gate;
-    private final Limits limits;
+    private final RateBudget rateBudget;
     private final TransferResources resources;
     private final Map<Key,Out> outs=new LinkedHashMap<>();
     private final Map<Key,In> ins=new LinkedHashMap<>();
     private final Map<Key,Done> done=new LinkedHashMap<>();
-    private final LinkedHashMap<DhtId,Bucket> peerBuckets=new LinkedHashMap<>();
-    private Bucket total;
     private long reserved;
     private long completedIn,completedOut,failedOut,abandonedIn,rateLimited,rejected,unsupported,mismatched,corrupt;
 
@@ -131,9 +129,14 @@ public final class DhtTransfers {
      */
     public DhtTransfers(byte[] group,Sender sender,LongSupplier ticker,Random random,DhtTransferSink sink,ValueGate gate,Limits limits,
             TransferResources resources,ManagedTransferSink managedSink) {
+        this(group,sender,ticker,random,sink,gate,resources,managedSink,new RateBudget(limits));
+    }
+
+    DhtTransfers(byte[] group,Sender sender,LongSupplier ticker,Random random,DhtTransferSink sink,ValueGate gate,
+            TransferResources resources,ManagedTransferSink managedSink,RateBudget rateBudget) {
         this.managedSink=managedSink;
         this.group=Objects.requireNonNull(group).clone();this.sender=Objects.requireNonNull(sender);this.ticker=Objects.requireNonNull(ticker);
-        this.random=Objects.requireNonNull(random);this.sink=sink;this.gate=Objects.requireNonNull(gate);this.limits=Objects.requireNonNull(limits);
+        this.random=Objects.requireNonNull(random);this.sink=sink;this.gate=Objects.requireNonNull(gate);this.rateBudget=Objects.requireNonNull(rateBudget);
         this.resources=Objects.requireNonNull(resources);
     }
 
@@ -179,7 +182,7 @@ public final class DhtTransfers {
     private void receive(DhtId peer,byte[] session,long generation,DhtWire.Message m,boolean managed) {
         Objects.requireNonNull(peer);Objects.requireNonNull(session);Objects.requireNonNull(m);
         long now=ticker.getAsLong();
-        if(!admit(peer,now)){rateLimited=inc(rateLimited);return;}
+        if(!rateBudget.admit(peer,now)){rateLimited=inc(rateLimited);return;}
         if(m.op()==DhtWire.Op.TRANSFER)onPiece(peer,session,m,now,generation,managed);
         else if(m.op()==DhtWire.Op.TRANSFER_ACK)onAck(peer,session,m,now);
     }
@@ -199,6 +202,7 @@ public final class DhtTransfers {
             In i=ii.next();
             if(now-i.started>=TOTAL_NANOS||now-i.lastProgress>=PROGRESS_NANOS) {
                 release(i);ii.remove();abandonedIn=inc(abandonedIn);
+                if(i.managed)notifyManaged(i,ManagedTransferResult.FAILED);
             }
         }
         done.values().removeIf(d->now-d.until>=0);
@@ -212,12 +216,12 @@ public final class DhtTransfers {
             In i=ii.next();
             if(i.peer.equals(peer)){release(i);ii.remove();abandonedIn=inc(abandonedIn);}
         }
-        done.keySet().removeIf(k->k.peer.equals(peer));peerBuckets.remove(peer);
+        done.keySet().removeIf(k->k.peer.equals(peer));rateBudget.forget(peer);
     }
     /** ネットワークが変わった。全部やめる。 */
     public void clear() {
         for(In in:ins.values())in.lease.close();
-        outs.clear();ins.clear();done.clear();peerBuckets.clear();reserved=0;
+        outs.clear();ins.clear();done.clear();rateBudget.clear();reserved=0;
     }
 
     public int activeOut(){return outs.size();}
@@ -251,15 +255,29 @@ public final class DhtTransfers {
         for(In i:ins.values())if(i.peer.equals(peer))n++;
         return n;
     }
-    private boolean admit(DhtId peer,long now) {
-        if(total==null)total=new Bucket(limits.totalPerSecond,limits.totalBurst,now);
-        Bucket mine=peerBuckets.remove(peer);
-        if(mine==null)mine=new Bucket(limits.peerPerSecond,limits.peerBurst,now);
-        peerBuckets.put(peer,mine);
-        while(peerBuckets.size()>MAX_PEER_BUCKETS){Iterator<DhtId> it=peerBuckets.keySet().iterator();it.next();it.remove();}
-        // 相手の袋で先に断ち、全体の袋を使い切らせない。
-        if(!mine.take(now))return false;
-        return total.take(now);
+    /**
+     * 発見用と管理用の断片・ACKで共有する速度予算。管理ページの予算とは別に持つ。
+     * <p>
+     * Rate budget shared by discovery and management pieces and ACKs, separate from management-page budgets.
+     */
+    static final class RateBudget {
+        private final Limits limits;
+        private final LinkedHashMap<DhtId,Bucket> peerBuckets=new LinkedHashMap<>();
+        private Bucket total;
+        RateBudget(Limits limits){this.limits=Objects.requireNonNull(limits);}
+        boolean admit(DhtId peer,long now) {
+            if(total==null)total=new Bucket(limits.totalPerSecond,limits.totalBurst,now);
+            Bucket mine=peerBuckets.remove(peer);
+            if(mine==null)mine=new Bucket(limits.peerPerSecond,limits.peerBurst,now);
+            peerBuckets.put(peer,mine);
+            while(peerBuckets.size()>MAX_PEER_BUCKETS){Iterator<DhtId> it=peerBuckets.keySet().iterator();it.next();it.remove();}
+            // 相手の袋で先に断ち、全体の袋を使い切らせない。
+            // Check the peer bucket first to avoid exhausting the global bucket.
+            if(!mine.take(now))return false;
+            return total.take(now);
+        }
+        void forget(DhtId peer){peerBuckets.remove(peer);}
+        void clear(){peerBuckets.clear();}
     }
 
     // ---- 送り手 ----
@@ -336,6 +354,10 @@ public final class DhtTransfers {
             return;
         }
         In in=ins.get(key);
+        if(in!=null&&in.managed&&(now-in.started>=TOTAL_NANOS||now-in.lastProgress>=PROGRESS_NANOS)) {
+            release(in);ins.remove(key);abandonedIn=inc(abandonedIn);
+            notifyManaged(in,ManagedTransferResult.FAILED);return;
+        }
         if(in==null) {
             if(managed?managedSink==null:sink==null){unsupported=inc(unsupported);return;}
             if(m.transferKind()==DhtWire.TransferKind.VALUE&&!gate.expected(peer,m.transferId())){rejected=inc(rejected);return;}
@@ -344,6 +366,7 @@ public final class DhtTransfers {
             try{in=new In(peer,session,m,now,lease,generation,managed);}
             catch(RuntimeException|Error failure){lease.close();throw failure;}
             reserved+=in.total;ins.put(key,in);
+            if(in.managed)managedSink.started(peer,session.clone(),generation,in.kind,in.id.clone(),now);
         } else if(in.managed!=managed||in.generation!=generation||!Arrays.equals(in.session,session)||!Arrays.equals(in.digest,m.digest())||in.total!=m.totalBytes()||in.count!=m.count()||in.kind!=m.transferKind()) {
             mismatched=inc(mismatched);return;
         }
@@ -373,7 +396,7 @@ public final class DhtTransfers {
         boolean ok=Crypto.equal(digestOf(in.buffer),in.digest);
         if(done.size()>=MAX_DONE){Iterator<Key> it=done.keySet().iterator();it.next();it.remove();}
         done.put(key,new Done(in,!ok,now+DONE_NANOS));
-        if(!ok){corrupt=inc(corrupt);return;}
+        if(!ok){corrupt=inc(corrupt);if(in.managed)notifyManaged(in,ManagedTransferResult.REJECTED);return;}
         ack(in.peer,in.session,in.id,in.digest,in.count,bitmap(in));
         completedIn=inc(completedIn);
         if(in.managed){

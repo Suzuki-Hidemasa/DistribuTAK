@@ -18,6 +18,7 @@ public class RosterExchangeTest {
         final LanGroup a,b;
         final SessionManager sa,sb;
         final CorePersistenceCoordinator ca,cb;
+        final RevocationUnion ua,ub;
         final LanControllerHarness.Disk da=new LanControllerHarness.Disk(54321),db=new LanControllerHarness.Disk(54322);
         final RevocationRecovery ra,rb;
         final RosterExchange xa,xb;
@@ -48,8 +49,9 @@ public class RosterExchangeTest {
             sa=a.sessions(wall,()->fixedSessionClock?0:now*1000000);sb=b.sessions(wall,()->fixedSessionClock?0:now*1000000);
             sa.rememberPeer(b.certificate);sb.rememberPeer(a.certificate);
             var second=sb.receive(sa.start(b.id()).packet());var third=sa.receive(second.outbound().get(0).packet());sb.receive(third.outbound().get(0).packet());
-            ca=new CorePersistenceCoordinator(a.state,sa,new RevocationUnion(a.groupId,new AdminStateTrust(a.state)),wall,deadlines);
-            cb=new CorePersistenceCoordinator(b.state,sb,new RevocationUnion(b.groupId,new AdminStateTrust(b.state)),wall,deadlines);
+            ua=new RevocationUnion(a.groupId,new AdminStateTrust(a.state));ub=new RevocationUnion(b.groupId,new AdminStateTrust(b.state));
+            ca=new CorePersistenceCoordinator(a.state,sa,ua,wall,deadlines);
+            cb=new CorePersistenceCoordinator(b.state,sb,ub,wall,deadlines);
             ra=recovery(a,sa,ca,da,true);rb=recovery(b,sb,cb,db,false);
             xa=new RosterExchange(a,sa,ca,deadlines,da,ra);xb=new RosterExchange(b,sb,cb,deadlines,db,rb);
         }

@@ -110,6 +110,7 @@ public final class CorePersistenceCoordinator {
     private final AdminState admin;
     private final SessionManager sessions;
     private final RevocationUnion revocations;
+    private final TransferResources transferResources=new TransferResources();
     private final Clock wall,deadlines;
     private final byte[] group;
     private State state;
@@ -143,7 +144,7 @@ public final class CorePersistenceCoordinator {
         this.revocations=Objects.requireNonNull(revocations);this.wall=Objects.requireNonNull(wall);this.deadlines=Objects.requireNonNull(deadlines);
         group=admin.administrators().group();this.requirement=requirement;
         revocations.restore(admin);
-        recoveryPages=new ManagementPageAssembler(group,deadlines,new TransferResources(),true);
+        recoveryPages=new ManagementPageAssembler(group,deadlines,transferResources,true);
         synchronized(sessions){
             state=requirement==null?State.RUNNING:State.RECOVERING_REVOCATIONS;recoveryStarted=deadlines.millis();
             sessions.coordinate(this,requirement!=null);
@@ -152,6 +153,12 @@ public final class CorePersistenceCoordinator {
     boolean coordinates(AdminState admin,SessionManager sessions,RevocationUnion union){return this.admin==admin&&this.sessions==sessions&&revocations==union;}
     private static IllegalArgumentException invalid(){return new IllegalArgumentException("Invalid persistence or recovery state");}
     public State state(){synchronized(sessions){return state;}}
+    /**
+     * 管理ページとDHTの共通組立枠。
+     * <p>
+     * Shared assembly slots for management pages and DHT.
+     */
+    public TransferResources transferResources(){return transferResources;}
     public StopReason stopReason(){synchronized(sessions){return stopReason;}}
     public String statusText(){synchronized(sessions){
         return state==State.STORAGE_FAILED&&stopReason==StopReason.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS||state==State.PERSISTING&&requirement!=null?"保存がいっぱい":"";

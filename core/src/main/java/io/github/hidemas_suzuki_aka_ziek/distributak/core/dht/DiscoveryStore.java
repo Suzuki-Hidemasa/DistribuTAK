@@ -29,6 +29,7 @@ public final class DiscoveryStore {
     private final LongSupplier ticker;
     private final Predicate<DhtId> revoked;
     private final int byteBudget;
+    private final DhtRecordBudget sharedBudget;
     private final Map<DhtId,DiscoveryRecord> records=new LinkedHashMap<>();
     private final Map<DhtId,Maximum> maxima=new LinkedHashMap<>();
     private final DiscoveryCounts counts=new DiscoveryCounts();
@@ -41,9 +42,21 @@ public final class DiscoveryStore {
     }
     /** 小さいバイト予算を使う試験専用。pluginから変える口は作らない。 */
     DiscoveryStore(byte[] group,Clock clock,LongSupplier ticker,Predicate<DhtId> revoked,int byteBudget) {
+        this(group,clock,ticker,revoked,byteBudget,new DhtRecordBudget());
+    }
+    /**
+     * 管理記録と同じ預かり容量を使う。
+     * <p>
+     * Shares copy capacity with management records.
+     */
+    public static DiscoveryStore shared(byte[] group,Clock clock,LongSupplier ticker,Predicate<DhtId> revoked,DhtRecordBudget budget){
+        return new DiscoveryStore(group,clock,ticker,revoked,MAX_ENCODED_BYTES,budget);
+    }
+    private DiscoveryStore(byte[] group,Clock clock,LongSupplier ticker,Predicate<DhtId> revoked,int byteBudget,DhtRecordBudget budget) {
         if(group==null||group.length!=32||byteBudget<1||byteBudget>MAX_ENCODED_BYTES)throw DiscoveryRecord.rejected(INVALID);
         this.group=group.clone();this.clock=Objects.requireNonNull(clock);this.ticker=Objects.requireNonNull(ticker);
         this.revoked=Objects.requireNonNull(revoked);this.byteBudget=byteBudget;lastTick=ticker.getAsLong();
+        sharedBudget=Objects.requireNonNull(budget);sharedBudget.register(this::purgeLocked);
     }
     /** 失効の判定や時計の中から表を呼ぶと、途中の状態を壊すので断る。 */
     private void enter() {
@@ -73,7 +86,7 @@ public final class DiscoveryStore {
     }
     /** 数えない本体。件数は呼び出し側が数える。 */
     private DiscoveryStatus putLocked(DhtId senderId,byte[] wire) {
-        purgeLocked();
+        sharedBudget.purge();
         try {
             DiscoveryRecord record=verify(wire,clock);
             if(senderId==null||!senderId.equals(record.nodeId()))return SENDER_MISMATCH;
@@ -83,6 +96,7 @@ public final class DiscoveryStore {
             DhtId key=record.key();DiscoveryRecord previous=records.get(key);
             if(previous==null&&records.size()>=MAX_RECORDS||!maxima.containsKey(key)&&maxima.size()>=MAX_VERSIONS
                     ||!hasByteCapacity(encodedBytes,previous==null?0:previous.encodedSize(),record.encodedSize(),byteBudget))return CAPACITY;
+            if(!sharedBudget.replace(previous==null?0:previous.encodedSize(),record.encodedSize()))return CAPACITY;
             encodedBytes=encodedBytes-(previous==null?0:previous.encodedSize())+record.encodedSize();
             records.put(key,record);maxima.put(key,new Maximum(record));return ACCEPTED;
         }catch(DiscoveryRejected rejected){return rejected.status();}
@@ -127,6 +141,7 @@ public final class DiscoveryStore {
                 Maximum maximum=maxima.get(entry.getKey());
                 if(maximum!=null&&maximum.active){maximum.active=false;maximum.removedAt=tick;maximum.removedEpoch=clockEpoch;}
             }
+            for(var record:records.values())sharedBudget.replace(record.encodedSize(),0);
             records.clear();encodedBytes=0;
         }finally{busy=false;}
     }
@@ -138,6 +153,7 @@ public final class DiscoveryStore {
             var entry=copies.next();DiscoveryRecord record=entry.getValue();
             // 時計・失効の判定が例外を出したら判定できない記録として除く（verify の例外を INVALID にするのと同じ側。外へは出さない）。
             if(clockUnreadable||wall>=0&&wall>=record.expiresAt()||isRevoked(record.nodeId())) {
+                sharedBudget.replace(record.encodedSize(),0);
                 encodedBytes-=record.encodedSize();copies.remove();Maximum maximum=maxima.get(entry.getKey());
                 if(maximum.active){maximum.active=false;maximum.removedAt=tick;maximum.removedEpoch=clockEpoch;}
             }

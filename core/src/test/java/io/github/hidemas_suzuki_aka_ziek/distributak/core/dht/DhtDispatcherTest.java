@@ -69,7 +69,8 @@ class DhtDispatcherTest {
         final List<DhtId> released=new ArrayList<>();
         long peerGeneration=AuthenticatedPeer.UNBOUND;
         DhtId claimAs;
-        Rig(Net net,DhtId id,Random rng) {
+        Rig(Net net,DhtId id,Random rng) {this(net,id,rng,GROUP);}
+        Rig(Net net,DhtId id,Random rng,byte[] group) {
             this.net=net;this.id=id;wall.millis=NOW;
             DhtDispatcher[] holder=new DhtDispatcher[1];
             DhtTransport transport=new DhtTransport() {
@@ -81,7 +82,7 @@ class DhtDispatcherTest {
             };
             node=new DhtNode<>(id,wall,net.nanos::get,transport,
                 (key,bytes,clock)->{if(bytes.length==0)throw new SecurityException("Invalid test value");return bytes.length;},Integer::compare);
-            store=new DiscoveryStore(GROUP,wall,net.nanos::get,revoked::contains);
+            store=new DiscoveryStore(group,wall,net.nanos::get,revoked::contains);
             responder=new DhtResponder(node,store,net.nanos::get);
             DhtLink link=new DhtLink() {
                 @Override public AuthenticatedPeer authenticated(byte[] peerId,byte[] sessionId) {
@@ -108,7 +109,7 @@ class DhtDispatcherTest {
                 @Override public boolean volatileSlotFree(){return slotFree;}
                 @Override public boolean startAllowed(){return startAllowed;}
             };
-            dispatcher=new DhtDispatcher(GROUP,node,responder,store,link,peerId->directory.get(peerId),
+            dispatcher=new DhtDispatcher(group,node,responder,store,link,peerId->directory.get(peerId),
                 (peer,kind,data)->sunk.add(new Sunk(peer,kind,data.clone())),net.nanos::get,rng,DhtTransfers.Limits.defaults());
             holder[0]=dispatcher;
         }

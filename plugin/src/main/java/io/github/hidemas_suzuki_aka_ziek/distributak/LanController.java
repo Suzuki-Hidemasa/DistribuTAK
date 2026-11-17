@@ -247,7 +247,12 @@ final class LanController implements AutoCloseable {
                     }
                     if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.COT_RECEIVE))continue;
                     if(LanSupport.isTestData(packet.wire)){rx++;log(LanSupport.receipt(rx,packet.peer));}
-                    else if(DhtWire.isDht(packet.wire)){if(dht==null||!dht.receive(packet.peer,packet.session,packet.wire))reject++;}
+                    else if(DhtWire.isDht(packet.wire)){
+                        if(dht==null||!dht.receive(packet.peer,packet.session,packet.wire))reject++;
+                        if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
+                            storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
+                        }
+                    }
                     else if(AdminControl.isEnvelope(packet.wire)){}
                     else if(RenewalMessage.isManagement(packet.wire)){receiveProofRenewal(packet.peer,packet.session,packet.wire);}
                     else if(receiveRenewal(packet.wire)){}
@@ -293,6 +298,7 @@ final class LanController implements AutoCloseable {
         catch(Exception e){reconnect.stop();releaseGroup();if(ready)message=RENEW_FAILED;}
     }
     private volatile CorePersistenceCoordinator persistence;
+    private RevocationUnion managementUnion;
     private volatile Clock managementClock;
     private RevocationRecovery recovery;
     private RosterExchange roster;
@@ -325,7 +331,8 @@ final class LanController implements AutoCloseable {
         try {
             sessions=group.sessions(clock,runtime.nanos);
             managementClock=new MonotonicClock(runtime.nanos);
-            persistence=new CorePersistenceCoordinator(group.state,sessions,new RevocationUnion(group.groupId,new AdminStateTrust(group.state)),
+            managementUnion=new RevocationUnion(group.groupId,new AdminStateTrust(group.state));
+            persistence=new CorePersistenceCoordinator(group.state,sessions,managementUnion,
                     clock,managementClock,group.recoveryRequirement);
             UdpEndpoint next=new UdpEndpoint(sessions,group.state,socket,receiver(epoch),
                     UdpEndpoint.DEFAULT_INTERVAL,runtime.nanos,reason->closed(epoch,reason));
@@ -585,7 +592,9 @@ final class LanController implements AutoCloseable {
                 }finally{Crypto.wipe(stored);}
             };
             cfg.log=this::log;
-            LanDht created=new LanDht(cfg);
+            if(persistence!=null)cfg.management=new ManagedDhtExchange(owner,managed,persistence,managementUnion,clock,managementClock,runtime.nanos,random,store);
+            final LanDht created;
+            try{created=new LanDht(cfg);}catch(RuntimeException|LinkageError failure){if(cfg.management!=null)cfg.management.close();throw failure;}
             dht=created;
             next.allowDiscoveredReplies(created::allowsReply);
             next.onVolatilePeerForgotten(peer->enqueue(()->{if(epoch==generation.get()&&dht==created)created.peerForgotten(peer);}));
@@ -723,6 +732,9 @@ final class LanController implements AutoCloseable {
             }
         }
         if(dht!=null)dht.step();
+        if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
+            storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
+        }
         publish();
     }
     private void savePeer(AdminRecords.Record certificate,InetSocketAddress address)throws Exception {
@@ -910,7 +922,7 @@ final class LanController implements AutoCloseable {
     private void stopNetwork(){
         if(recovery!=null){recovery.close();recovery=null;}
         if(roster!=null){roster.close();roster=null;}managedSessions=null;recoveringNetwork=false;
-        persistence=null;managementClock=null;joining=false;proofRequests.close();
+        persistence=null;managementUnion=null;managementClock=null;joining=false;proofRequests.close();
         for(var entry:memberFirst.values())Crypto.wipe(entry.session);memberFirst.clear();
         for(byte[] session:deliverySessions.values())Crypto.wipe(session);deliverySessions.clear();
         // callbackは同じworkerへキューを置くだけなので、ここからcloseを待てる。
