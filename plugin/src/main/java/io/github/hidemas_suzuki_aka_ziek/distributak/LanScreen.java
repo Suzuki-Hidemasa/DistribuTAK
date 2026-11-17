@@ -23,6 +23,9 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
     private final TextView state;
     private final Button create,scan,invite,reinvite,connect,send,stop,portButton,erase,dhtRescan,removeUnknown;
     private final Button fenceTest,fenceOnlyTest,fenceBroadcastTest,fenceServersTest,fenceAnyTest,fenceTakServerTest;
+    private final Button rotateKey,namePeer;
+    private final Button requestAdmin,approveAdmin,offerAdmin,removeAdmin,revokeMember,renamePeer;
+    private EditText labelInput;
     private final EditText port;
     private LanController controller;
     private Dialog sensitive,managementConfirmation;
@@ -63,6 +66,14 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
         send=button("試験DATAを1回送る",()->controller.sendTest());stop=button("通信を止める",()->controller.disconnect());
         dhtRescan=button("DHTを探し直す",()->controller.rescanDht());
         removeUnknown=button("対応のない管理者をすべて外す",()->controller.removeUnknown(controller.ticket()));
+        rotateKey=button("グループの鍵を入れ替える",()->controller.rotateKey(controller.ticket()));
+        namePeer=button("呼び名を付ける",()->controller.namePeer(controller.ticket()));
+        renamePeer=button("呼び名を変える",()->controller.chooseManagement(controller.ticket(),LanController.ManagementAction.RENAME));
+        requestAdmin=button("管理者の権限をリクエスト",()->controller.requestAdministration(controller.ticket()));
+        approveAdmin=button("認める",()->controller.chooseManagement(controller.ticket(),LanController.ManagementAction.APPROVE));
+        offerAdmin=button("管理者にする",()->controller.chooseManagement(controller.ticket(),LanController.ManagementAction.OFFER));
+        removeAdmin=button("管理者から外す",()->controller.chooseManagement(controller.ticket(),LanController.ManagementAction.REMOVE));
+        revokeMember=button("メンバーを取り消す",()->controller.chooseManagement(controller.ticket(),LanController.ManagementAction.REVOKE));
         fenceTest=CotFixtureControl.button(BuildConfig.DEBUG,()->button("架空のCoTで柵を確かめる",()->controller.debugFence()));
         fenceOnlyTest=CotFixtureControl.button(BuildConfig.DEBUG,()->button("架空のCoTで柵だけを確かめる",()->controller.debugFenceOnly()));
         fenceBroadcastTest=CotFixtureControl.button(BuildConfig.DEBUG,()->button("架空のCoTを broadcast で送らせる",()->controller.debugFenceSend(CotPort.Send.BROADCAST)));
@@ -100,6 +111,10 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
         dhtRescan.setEnabled(usable&&status.wifi&&status.running&&status.dht);
         removeUnknown.setVisibility(status.unknown>0?View.VISIBLE:View.GONE);
         removeUnknown.setEnabled(usable&&status.wifi&&status.running&&status.unknown>0);
+        boolean management=usable&&status.wifi&&status.running&&status.managementAdmin;
+        rotateKey.setEnabled(management);namePeer.setEnabled(management);renamePeer.setEnabled(management);
+        approveAdmin.setEnabled(management);offerAdmin.setEnabled(management);removeAdmin.setEnabled(management);revokeMember.setEnabled(management);
+        requestAdmin.setEnabled(usable&&status.wifi&&status.running&&status.member&&!status.managementAdmin);
         if(fenceTest!=null)fenceTest.setEnabled(usable&&status.running);
         if(fenceOnlyTest!=null)fenceOnlyTest.setEnabled(usable&&status.running);
         if(fenceBroadcastTest!=null)fenceBroadcastTest.setEnabled(usable&&status.running);
@@ -122,8 +137,55 @@ final class LanScreen implements LanController.Ui,AutoCloseable {
         next.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);next.show();
     }
     @Override public void hideManagementConfirmation(){
+        if(labelInput!=null){labelInput.setText("");labelInput=null;}
         Dialog previous=managementConfirmation;managementConfirmation=null;
         if(previous!=null){previous.setOnCancelListener(null);previous.dismiss();}
+    }
+    @Override public void confirmManagement(Object token,String title,String text){
+        if(!foreground()){controller.cancelManagement();return;}
+        hideManagementConfirmation();
+        var next=new AlertDialog.Builder(context).setTitle(title).setMessage(text)
+                .setNegativeButton("戻る",(dialog,which)->controller.cancelManagement())
+                .setPositiveButton("確かめて進む",(dialog,which)->{hideManagementConfirmation();controller.confirmManagement(token);}).create();
+        showManagement(next);
+    }
+    private void showManagement(AlertDialog next){
+        managementConfirmation=next;next.setOnCancelListener(dialog->{hideManagementConfirmation();controller.cancelManagement();});
+        next.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);next.show();
+    }
+    @Override public void namingWait(Object token){
+        if(!foreground()){controller.cancelManagement();return;}
+        hideManagementConfirmation();
+        showManagement(new AlertDialog.Builder(context).setTitle("呼び名を付ける相手を確かめます")
+                .setMessage("もう一度、相手に切断して接続し直してもらってください。接続の変化が1件だけなら確認へ進みます。この方法は、暗号で本人の身元を保証するものではありません。")
+                .setNegativeButton("戻る",(dialog,which)->controller.cancelManagement()).create());
+    }
+    @Override public void inputLabel(Object token){
+        if(!foreground()){controller.cancelManagement();return;}
+        hideManagementConfirmation();var input=new EditText(context);labelInput=input;
+        input.setSaveEnabled(false);input.setSaveFromParentEnabled(false);
+        input.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        if(Build.VERSION.SDK_INT>=26)input.setImeOptions(input.getImeOptions()|android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        if(Build.VERSION.SDK_INT>=26)input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
+        var next=new AlertDialog.Builder(context).setTitle("端末の中だけで使う呼び名")
+                .setMessage("32文字・128バイト以内で入力してください。ほかの端末には送りません。")
+                .setView(input).setNegativeButton("戻る",(dialog,which)->{hideManagementConfirmation();controller.cancelManagement();})
+                .setPositiveButton("確かめる",null).create();showManagement(next);
+        next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view->{
+            String label=input.getText().toString();
+            try{LocalLabels.validate(label);}
+            catch(IllegalArgumentException invalid){input.setError("呼び名を確かめてください");return;}
+            hideManagementConfirmation();controller.setLabel(token,label);
+        });
+    }
+    @Override public void chooseManagement(Object token,String title,java.util.List<LanController.NamedChoice> choices){
+        if(!foreground()){controller.cancelManagement();return;}
+        hideManagementConfirmation();String[] labels=new String[choices.size()];
+        for(int i=0;i<labels.length;i++)labels[i]=choices.get(i).label;
+        showManagement(new AlertDialog.Builder(context).setTitle(title).setItems(labels,(dialog,which)->{
+            Object selected=choices.get(which).token;hideManagementConfirmation();controller.selectManagement(token,selected);
+        }).setNegativeButton("戻る",(dialog,which)->controller.cancelManagement()).create());
     }
     private Dialog dialog(LinearLayout content) {
         Dialog dialog=new Dialog(context);dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);dialog.setContentView(content);

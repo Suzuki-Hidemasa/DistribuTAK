@@ -40,6 +40,10 @@ final class VersionSixStorage {
     }
     private Candidate prepare(LanGroup group,AdminRecordStore.Snapshot snapshot,CorePersistenceCoordinator.PersistenceRequest request,
                               byte[] key,long keyVersion,Map<String,long[]> reservations,List<byte[]> outgoing,MemberDirectory directory,Map<String,String> labels)throws Exception {
+        return prepare(group,snapshot,request,key,keyVersion,reservations,outgoing,directory,labels,null);
+    }
+    private Candidate prepare(LanGroup group,AdminRecordStore.Snapshot snapshot,CorePersistenceCoordinator.PersistenceRequest request,
+                              byte[] key,long keyVersion,Map<String,long[]> reservations,List<byte[]> outgoing,MemberDirectory directory,Map<String,String> labels,byte[] secret)throws Exception {
         long seq=Math.addExact(group.saveSeq,1),generation=files.nextGeneration();
         var management=ManagementState.candidate(group,generation,snapshot,group.clock);
         if(directory!=null){management=management.directory(directory,labels);
@@ -57,7 +61,7 @@ final class VersionSixStorage {
             management=management.checkpoint(new ManagementState.Checkpoint(number,generation,snapshot.records().size(),snapshot.administratorVersion(),snapshot.revocationVersion(),
                     snapshot.revocations(),received.encode(),target,previous,previous==null?null:request.requirement().subjects()));
             if(previous!=null&&previous.candidateLess())management=management.checkpoint(management.checkpoint.basis(group.state.snapshot()));
-            byte[] canonicalState=encode(group,management,seq,new byte[32],key,keyVersion),canonicalManagement=management.encode(true);
+            byte[] canonicalState=encode(group,management,seq,new byte[32],key,keyVersion,secret),canonicalManagement=management.encode(true);
             byte[] digest;
             try{digest=candidateDigest(canonicalState,canonicalManagement);}finally{Crypto.wipe(canonicalState);Crypto.wipe(canonicalManagement);}
             management=management.checkpoint(management.checkpoint.digest(digest));Crypto.wipe(digest);
@@ -65,7 +69,7 @@ final class VersionSixStorage {
         byte[] plain=management.encode(false),wire=null,state=null;
         try{
             wire=managementEnvelope.seal(plain);byte[] digest=Crypto.blake2s(wire);
-            state=encode(group,management,seq,digest,key,keyVersion);
+            state=encode(group,management,seq,digest,key,keyVersion,secret);
             var checked=management;
             boolean selfRevoked=management.union.stream().anyMatch(id->Crypto.equal(id,group.id()));
             if(!selfRevoked)try(var restored=LanGroup.decode(state,group.clock,true,(g,d)->checked)){
@@ -85,8 +89,19 @@ final class VersionSixStorage {
         }
     }
     private static byte[] encode(LanGroup group,ManagementState management,long sequence,byte[] digest,byte[] key,long version)throws IOException{
+        return encode(group,management,sequence,digest,key,version,null);
+    }
+    private static byte[] encode(LanGroup group,ManagementState management,long sequence,byte[] digest,byte[] key,long version,byte[] secret)throws IOException{
         long old=group.saveSeq;group.saveSeq=sequence;
-        try{return group.encodeSix(management,management.generation,digest,key,version);}finally{group.saveSeq=old;}
+        try{return secret==null?group.encodeSix(management,management.generation,digest,key,version):
+                group.encodeMembership(management,management.generation,digest,secret);}finally{group.saveSeq=old;}
+    }
+    synchronized int saveMembership(LanGroup group,StateEnvelope.AtomicTarget target,AdminRecordStore.Snapshot snapshot,byte[] secret)throws Exception{
+        if(pending!=null||group.storageBlocked)throw new IllegalStateException("保存を待たせています");
+        if(secret.length!=0&&secret.length!=32)throw new IllegalArgumentException("保存候補を確かめられません");
+        try(var candidate=prepare(group,snapshot,null,null,group.keyVersion,null,null,null,null,secret.length==0?null:secret)){
+            return commit(group,candidate,target);
+        }
     }
     synchronized int save(LanGroup group,StateEnvelope.AtomicTarget target)throws Exception{
         if(pending!=null||group.storageBlocked)throw new IllegalStateException("保存を待たせています");

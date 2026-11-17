@@ -26,6 +26,10 @@ final class LanController implements AutoCloseable {
         long screenEpoch();boolean foreground();
         default void confirmUnknown(Object token,int count){}
         default void hideManagementConfirmation(){}
+        default void confirmManagement(Object token,String title,String text){}
+        default void namingWait(Object token){}
+        default void inputLabel(Object token){}
+        default void chooseManagement(Object token,String title,List<NamedChoice> choices){}
     }
     static final class Ticket {
         final long screen,network,revision;final LanRuntime.Link link;
@@ -39,6 +43,7 @@ final class LanController implements AutoCloseable {
         final boolean rejoin,reinvite;
         int unknown;
         boolean operationsReady=true;
+        boolean managementAdmin;
         /** 画面の「DHTを探し直す」ボタンを押せるか（DHT が動いているとき）。 */
         final boolean dht;
         Status(String text,boolean ready,boolean wifi,boolean member,boolean admin,boolean busy,boolean running,boolean erased,boolean erasing,int port,boolean rejoin,boolean reinvite){
@@ -111,7 +116,43 @@ final class LanController implements AutoCloseable {
     private int invitationSide;
     private Object confirmation;
     private boolean managementBusy;
+    // 個別削除の確認の基準は、準備へ移っても保存まで保つ。
+    // Keep the individual-removal confirmation basis through preparation until persistence.
+    private ManagementPending managementPending,removalBasis;
+    private enum ManagementStep {ROTATE,NAMING_WAIT,NAMING_CONFIRM,LABEL_INPUT,LABEL_SAVE,CHOOSE,ACTION,REQUEST,OFFER_WAIT}
+    enum ManagementAction {RENAME,APPROVE,OFFER,REMOVE,REVOKE}
+    static final class NamedChoice {
+        final Object token;final String label;
+        NamedChoice(Object token,String label){this.token=token;this.label=label;}
+        @Override public String toString(){return "Named choice";}
+    }
+    private static final class ManagementPending {
+        Object token=new Object();final Ticket ticket;final long generation,keyVersion;
+        final byte[] basis,revocations;byte[] localCertificate;final LanGroup owner;
+        final Map<String,String> aliases;
+        ManagementStep step=ManagementStep.ROTATE;
+        final Map<String,byte[]> baseline=new HashMap<>();
+        NamingCandidates namingCandidates;
+        AdminRecords.Record target,targetReplacement;byte[] targetSession;String label;
+        ManagementAction action;boolean naming;
+        final Map<Object,AdminRecords.Record> choices=new LinkedHashMap<>();
+        ManagementPending(Ticket ticket,long generation,LanGroup group){
+            this.ticket=ticket;this.generation=generation;owner=group;keyVersion=group.keyVersion;
+            basis=group.state.administrators().encode();revocations=group.state.revocations().encode();localCertificate=group.certificate.encode();
+            aliases=group.management==null?Map.of():group.management.aliases;
+        }
+        @Override public String toString(){return "Management confirmation";}
+    }
     private GroupAdministration incomingAdministration;
+    private final Map<String,AdministrationRequest> administrationRequests=new HashMap<>();
+    private static final class AdministrationRequest {
+        final AdminControl message;final byte[] session,certificate;
+        AdministrationRequest(AdminControl message,byte[] session,AdminRecords.Record certificate){this.message=message;this.session=session.clone();this.certificate=certificate.encode();}
+        @Override public String toString(){return "Administration request";}
+    }
+    private AdminControl outboundAdministration;
+    private boolean refreshManagement;
+    private boolean individualRemoval;
     private LanGroup unknownOwner;
     private AdminRecords.Record unknownList,unknownLocal;
     private byte[] unknownSecret;
@@ -279,11 +320,12 @@ final class LanController implements AutoCloseable {
                     if(LanSupport.isTestData(packet.wire)){rx++;log(LanSupport.receipt(rx,packet.peer));}
                     else if(DhtWire.isDht(packet.wire)){
                         if(dht==null||!dht.receive(packet.peer,packet.session,packet.wire))reject++;
+                        if(committedNotApplied){stopNetwork();continue;}
                         if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
                             storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
                         }
                     }
-                    else if(AdminControl.isEnvelope(packet.wire)){}
+                    else if(AdminControl.isEnvelope(packet.wire)){receiveAdministration(packet.peer,packet.session,packet.wire);}
                     else if(RenewalMessage.isManagement(packet.wire)){receiveProofRenewal(packet.peer,packet.session,packet.wire);}
                     else if(receiveRenewal(packet.wire)){}
                     else if(sync!=null){
@@ -573,17 +615,264 @@ final class LanController implements AutoCloseable {
         managementBusy=true;pollPreparation();
     });}
     void cancelManagement(){enqueue(()->{cancelPreparation();message="操作を取り消しました";publish();});}
+    void rotateKey(Ticket ticket){submit(()->{
+        requireTicket(ticket);requireReady();requireGroup();
+        if(endpoint==null||managedSessions==null||!managementActive()||preparation!=null||managementPending!=null
+                ||group==null||!group.isAdministrator()||!permits(CorePersistenceCoordinator.Operation.ADMINISTRATION))
+            throw new Unavailable("今は操作できません");
+        var next=new ManagementPending(ticket,generation.get(),group);managementPending=next;
+        main.accept(()->{if(managementPending==next&&accepts(ticket))ui.confirmManagement(next.token,"グループの鍵を入れ替えますか",
+                "受け取れなかった相手には、新しい招待が必要になることがあります。");});
+    });}
+    void namePeer(Ticket ticket){submit(()->{
+        requireTicket(ticket);requireReady();requireGroup();
+        if(group==null||!group.isAdministrator()||endpoint==null||managedSessions==null||!managementActive()||preparation!=null||managementPending!=null)
+            throw new Unavailable("今は操作できません");
+        var next=new ManagementPending(ticket,generation.get(),group);next.step=ManagementStep.NAMING_WAIT;next.naming=true;
+        next.baseline.putAll(connectedUnnamed());next.namingCandidates=new NamingCandidates(next.baseline);managementPending=next;
+        Object token=next.token;main.accept(()->{if(managementPending==next&&accepts(ticket))ui.namingWait(token);});
+    });}
+    private GroupAdministration incoming(){
+        if(incomingAdministration!=null&&!Arrays.equals(incomingAdministration.certificate().encode(),group.certificate.encode())){
+            incomingAdministration.close();incomingAdministration=null;administrationRequests.clear();outboundAdministration=null;
+        }
+        if(incomingAdministration==null)incomingAdministration=administration();return incomingAdministration;
+    }
+    void requestAdministration(Ticket ticket){submit(()->{
+        requireTicket(ticket);requireReady();requireGroup();
+        if(group==null||group.isAdministrator()||endpoint==null||managedSessions==null||preparation!=null||managementPending!=null
+                ||!managementActive()||group.certificate.format()!=2)throw new Unavailable("今は操作できません");
+        var eligible=eligibleAdministrators();
+        if(eligible.size()!=1)throw new Unavailable("接続中の依頼できる管理者が1人だけのときに押してください");
+        var next=new ManagementPending(ticket,generation.get(),group);next.step=ManagementStep.REQUEST;next.target=eligible.get(0);
+        next.targetSession=managedSessions.sessionId(Crypto.blake2s(next.target.field(0)));managementPending=next;
+        showManagement(next,"管理者の権限をリクエストしますか","接続中の管理者1人に依頼を送ります。管理者が認めて保存するまで権限は増えません。");
+    });}
+    private List<AdminRecords.Record> eligibleAdministrators(){
+        var eligible=new ArrayList<AdminRecords.Record>();
+        try(var service=administration()){
+            for(var peer:endpoint.knownPeers()){
+                var cert=peer.certificate();byte[] id=Crypto.blake2s(cert.field(0));
+                if(managedSessions.verifiedSession(id)==null)continue;
+                boolean bound=service.bindings().stream().anyMatch(b->b.state()==AdminBinding.State.BOUND
+                        &&Crypto.equal(b.memberId(),id)&&Crypto.equal(b.identityKey(),cert.field(0)));
+                if(bound)eligible.add(cert);
+            }
+        }
+        return eligible;
+    }
+    private static String identity(AdminRecords.Record cert){return Base64.getEncoder().encodeToString(cert.field(0));}
+    private static String memberName(byte[] id){return Base64.getEncoder().encodeToString(id);}
+    private List<byte[]> authorityKeys(AdminRecords.Record cert){
+        byte[] id=Crypto.blake2s(cert.field(0));var keys=new ArrayList<byte[]>();
+        for(var binding:group.state.administrators().bindings())if(binding.state()==AdminBinding.State.BOUND
+                &&Crypto.equal(binding.memberId(),id)&&Crypto.equal(binding.identityKey(),cert.field(0)))keys.add(binding.administratorKey());
+        return keys;
+    }
+    void chooseManagement(Ticket ticket,ManagementAction action){submit(()->{
+        requireTicket(ticket);requireReady();requireGroup();
+        if(group==null||!group.isAdministrator()||endpoint==null||managedSessions==null||!managementActive()||preparation!=null||managementPending!=null)
+            throw new Unavailable("今は操作できません");
+        var next=new ManagementPending(ticket,generation.get(),group);next.step=ManagementStep.CHOOSE;next.action=action;
+        var labels=next.aliases;var choices=new ArrayList<NamedChoice>();
+        try(var service=administration()){
+            for(byte[] bytes:service.directory().snapshot()){
+                var cert=AdminRecords.decode(bytes);String label=labels.get(identity(cert));byte[] id=Crypto.blake2s(cert.field(0));
+                if(label==null||Crypto.equal(id,group.id())||persistence.isRevoked(id))continue;
+                boolean connected=managedSessions.verifiedSession(id)!=null,bound=!authorityKeys(cert).isEmpty();
+                if(action==ManagementAction.REMOVE&&!bound)continue;
+                if(action==ManagementAction.REVOKE&&(bound||unknownCount()!=0))continue;
+                if((action==ManagementAction.OFFER||action==ManagementAction.APPROVE)&&(!connected||bound||cert.format()!=2))continue;
+                if(action==ManagementAction.APPROVE&&!administrationRequests.containsKey(memberName(id)))continue;
+                Object token=new Object();next.choices.put(token,cert);choices.add(new NamedChoice(token,label));
+            }
+        }
+        if(choices.isEmpty())throw new Unavailable("呼び名を付けた操作できる相手がいません");
+        managementPending=next;Object token=next.token;List<NamedChoice> displayed=List.copyOf(choices);
+        main.accept(()->{if(managementPending==next&&accepts(ticket))ui.chooseManagement(token,"呼び名で相手を選んでください",displayed);});
+    });}
+    private void showManagement(ManagementPending value,String title,String text){
+        Object token=value.token;main.accept(()->{if(managementPending==value&&value.token==token&&accepts(value.ticket))ui.confirmManagement(token,title,text);});
+    }
+    void selectManagement(Object token,Object choice){submit(()->{
+        var value=managementPending;if(value==null||value.step!=ManagementStep.CHOOSE||token!=value.token)return;
+        if(!managementCurrent(value)){cancelPreparation();message="確認の条件が変わりました。操作を取り消しました";return;}
+        var target=value.choices.get(choice);if(target==null)return;value.target=target;value.label=value.aliases.get(identity(target));
+        value.targetSession=managedSessions.sessionId(Crypto.blake2s(target.field(0)));
+        value.token=new Object();value.step=ManagementStep.ACTION;
+        if(value.action==ManagementAction.RENAME){value.step=ManagementStep.LABEL_INPUT;Object input=value.token;
+            main.accept(()->{if(managementPending==value&&value.token==input&&accepts(value.ticket))ui.inputLabel(input);});return;}
+        if(value.action==ManagementAction.REMOVE){
+            var keys=authorityKeys(target);if(keys.isEmpty()||keys.size()>=group.state.administrators().entries().size()){
+                cancelPreparation();message="最後の管理者は外せません";return;
+            }
+            managementPending=null;
+            try{beginPreparation(value.ticket,0,false,keys,false);removalBasis=value;individualRemoval=true;}
+            catch(RuntimeException failure){cancelPreparation();message="今は操作できません。操作を取り消しました";return;}
+            Object confirmationToken=confirmation;int online=preparation.preparation.incomplete();int offline=0;
+            for(var entry:preparation.administration.directory().validRecipients())if(keys.stream().anyMatch(k->Crypto.equal(k,entry.certificate().signer()))
+                    &&!Crypto.equal(entry.memberId(),group.id())&&managedSessions.verifiedSession(entry.memberId())==null)offline++;
+            String text=value.label+"\n接続中で切り替えを待つ相手: "+online+" 件。今は更新できない相手: "+offline+" 件。";
+            main.accept(()->{if(confirmation==confirmationToken&&accepts(value.ticket))ui.confirmManagement(confirmationToken,"管理者から外しますか",text);});return;
+        }
+        if(value.action==ManagementAction.APPROVE||value.action==ManagementAction.OFFER)
+            value.targetSession=managedSessions.sessionId(Crypto.blake2s(target.field(0)));
+        String title=value.action==ManagementAction.REVOKE?"メンバーを取り消して鍵を入れ替えますか":
+                value.action==ManagementAction.APPROVE?"管理者の依頼を認めますか":"管理者にしますか";
+        String text=value.label+(value.action==ManagementAction.REVOKE?
+                "\n必ずグループの鍵を入れ替えます。同じ身元では戻れません。相手は消去され、戻るには新しい身元と招待が必要です。":"\n対象: 1 件。保存してから管理者の権限を付けます。");
+        showManagement(value,title,text);
+    });}
+    private Map<String,byte[]> connectedUnnamed(){
+        var result=new HashMap<String,byte[]>();if(endpoint==null||group==null)return result;
+        var labels=group.management==null?Map.<String,String>of():group.management.aliases;
+        for(var peer:endpoint.knownPeers()){
+            var cert=peer.certificate();String identity=Base64.getEncoder().encodeToString(cert.field(0));
+            var session=managedSessions.verifiedSession(Crypto.blake2s(cert.field(0)));
+            if(session!=null&&!labels.containsKey(identity))result.put(identity,session.sessionId());
+        }
+        return result;
+    }
+    private void pollNaming(){
+        var next=managementPending;if(next==null||!next.naming)return;
+        var current=next.namingCandidates.observe(connectedUnnamed());
+        if(current.size()>1||(next.target!=null&&(current.size()!=1||!current.containsKey(Base64.getEncoder().encodeToString(next.target.field(0)))))){
+            cancelPreparation();message="もう一度、相手に切断して接続し直してもらってください";return;
+        }
+        if(next.step!=ManagementStep.NAMING_WAIT||current.size()!=1)return;
+        String identity=current.keySet().iterator().next();
+        for(var peer:endpoint.knownPeers())if(identity.equals(Base64.getEncoder().encodeToString(peer.certificate().field(0)))){
+            next.target=peer.certificate();next.targetSession=current.get(identity);next.step=ManagementStep.NAMING_CONFIRM;next.token=new Object();
+            Object token=next.token;main.accept(()->{if(managementPending==next&&next.token==token&&accepts(next.ticket))
+                ui.confirmManagement(token,"接続し直した相手に呼び名を付けますか","対象: 1 件。本人に接続し直してもらったことを確かめてください。この方法は、暗号で本人の身元を保証するものではありません。");});
+            break;
+        }
+    }
+    void setLabel(Object token,String label){submit(()->{
+        pollNaming();
+        var value=managementPending;if(value==null||value.step!=ManagementStep.LABEL_INPUT||token!=value.token)return;
+        if(!managementCurrent(value)){cancelPreparation();message="確認の条件が変わりました。操作を取り消しました";return;}
+        try{LocalLabels.validate(label);for(var entry:value.aliases.entrySet())if(!entry.getKey().equals(identity(value.target))&&entry.getValue().equals(label))throw new IllegalArgumentException();}
+        catch(IllegalArgumentException invalid){message="呼び名を確かめてください。32文字・128バイト以内で、空欄・制御文字・重複は使えません";
+            main.accept(()->{if(managementPending==value&&token==value.token&&accepts(value.ticket))ui.inputLabel(token);});return;}
+        value.label=label;value.step=ManagementStep.LABEL_SAVE;value.token=new Object();Object confirmationToken=value.token;
+        main.accept(()->{if(managementPending==value&&value.token==confirmationToken&&accepts(value.ticket))
+            ui.confirmManagement(confirmationToken,"呼び名を保存しますか",label+"\nこの端末の中だけで使います。");});
+    });}
+    private boolean managementActive(){return dht!=null&&dht.active();}
+    private boolean managementCurrent(ManagementPending value){
+        return value!=null&&group==value.owner&&endpoint!=null&&managementActive()&&value.generation==generation.get()
+                &&accepts(value.ticket)&&group.keyVersion==value.keyVersion
+                &&Arrays.equals(value.localCertificate,group.certificate.encode())
+                &&Arrays.equals(value.basis,group.state.administrators().encode())
+                &&Arrays.equals(value.revocations,group.state.revocations().encode())
+                &&value.aliases.equals(group.management==null?Map.of():group.management.aliases)
+                &&targetSessionCurrent(value)
+                &&(value.step==ManagementStep.REQUEST?!group.isAdministrator():group.isAdministrator()&&group.state.administrators().hasEntry(Crypto.ed25519Public(group.administratorSecret)))
+                &&targetCertificateCurrent(value)
+                &&permits(CorePersistenceCoordinator.Operation.ADMINISTRATION);
+    }
+    private boolean targetSessionCurrent(ManagementPending value){
+        if(value.target==null)return true;
+        byte[] peer=Crypto.blake2s(value.target.field(0)),session=managedSessions.sessionId(peer);
+        // この準備が保存した証明書だけを、新しい接続へ引き継ぐ。
+        // Carry only a certificate saved by this preparation into the new connection.
+        if(value==removalBasis&&value.targetReplacement!=null){
+            var current=managedSessions.peerCertificate(peer);
+            if(session!=null&&current!=null&&Arrays.equals(current.encode(),value.targetReplacement.encode())){
+                value.target=value.targetReplacement;value.targetReplacement=null;value.targetSession=session;
+            }else if(session==null)return true;
+        }
+        return (value!=removalBasis&&value.targetSession==null)||Arrays.equals(value.targetSession,session);
+    }
+    private boolean targetCertificateCurrent(ManagementPending value){
+        if(value.target==null)return true;
+        byte[] peer=Crypto.blake2s(value.target.field(0));
+        var current=managedSessions.peerCertificate(peer);
+        if(current!=null&&!Arrays.equals(current.encode(),value.target.encode())
+                &&(value.targetReplacement==null||!Arrays.equals(current.encode(),value.targetReplacement.encode())))return false;
+        if(group.management!=null)for(byte[] bytes:group.management.roster){
+            var saved=AdminRecords.decode(bytes);
+            if(Crypto.equal(saved.field(0),value.target.field(0))&&saved.issuedAt()>value.target.issuedAt()
+                    &&(value.targetReplacement==null||!Arrays.equals(saved.encode(),value.targetReplacement.encode())))return false;
+        }
+        return true;
+    }
+    void confirmManagement(Object token){submit(()->{
+        if(token!=null&&token==confirmation&&preparation!=null){confirmUnknown(token);return;}
+        pollNaming();
+        var value=managementPending;if(value==null||token!=value.token)return;
+        if(!managementActive()){cancelPreparation();message="今は操作できません。操作を取り消しました";return;}
+        if(!managementCurrent(value)){cancelPreparation();message="確認の条件が変わりました。操作を取り消しました";return;}
+        if(value.step==ManagementStep.NAMING_CONFIRM){
+            value.step=ManagementStep.LABEL_INPUT;value.token=new Object();Object inputToken=value.token;
+            main.accept(()->{if(managementPending==value&&value.token==inputToken&&accepts(value.ticket))ui.inputLabel(inputToken);});return;
+        }
+        if(value.step==ManagementStep.LABEL_SAVE){
+            managementPending=null;main.accept(ui::hideManagementConfirmation);
+            var labels=new TreeMap<>(value.aliases);labels.put(Base64.getEncoder().encodeToString(value.target.field(0)),value.label);
+            long before=group.saveSeq;
+            try(var administration=administration()){
+                administration.directory().saved(value.target);
+                synchronized(managedSessions){synchronized(administration){saving(()->{store.saveDirectory(group,administration.directory(),labels);return null;});}}
+                message="呼び名を保存しました";
+            }catch(Exception failure){if(group.saveSeq>before)stopCommittedPreparation();else message="呼び名を保存できませんでした";}
+            return;
+        }
+        if(value.step==ManagementStep.REQUEST){
+            var eligible=eligibleAdministrators();
+            if(eligible.size()!=1||!Arrays.equals(eligible.get(0).encode(),value.target.encode())){
+                cancelPreparation();message="依頼できる管理者の人数か相手が変わりました。操作を取り消しました";return;
+            }
+            managementPending=null;main.accept(ui::hideManagementConfirmation);
+            try{
+                outboundAdministration=incoming().request(managedSessions,Crypto.blake2s(value.target.field(0)));
+                sendAdministration(Crypto.blake2s(value.target.field(0)),value.targetSession,outboundAdministration);
+                message="管理者の権限をリクエストしました";
+            }catch(RuntimeException failure){clearAdministration();message="リクエストを送れませんでした";}
+            return;
+        }
+        if(value.step==ManagementStep.ACTION&&(value.action==ManagementAction.APPROVE||value.action==ManagementAction.OFFER)){
+            byte[] peer=Crypto.blake2s(value.target.field(0));
+            try{
+                if(value.action==ManagementAction.OFFER){
+                    value.step=ManagementStep.OFFER_WAIT;value.token=new Object();managementBusy=true;main.accept(ui::hideManagementConfirmation);
+                    sendAdministration(peer,value.targetSession,incoming().offer(managedSessions,peer));message="相手の確認を待っています";
+                }else{approveAdministration(peer);cancelPreparation();}
+            }catch(Exception failure){cancelPreparation();message="付与を完了できませんでした";}
+            return;
+        }
+        if(value.step!=ManagementStep.ROTATE&&(value.step!=ManagementStep.ACTION||value.action!=ManagementAction.REVOKE))return;
+        managementPending=null;main.accept(ui::hideManagementConfirmation);
+        KeyRotationCoordinator.Result result;
+        long before=group.saveSeq;
+        try{synchronized(managedSessions){result=dht.manualRotation(value.action==ManagementAction.REVOKE?List.of(Crypto.blake2s(value.target.field(0))):List.of());}}
+        catch(RuntimeException failure){
+            if(group.saveSeq>before||persistence.stopReason()==CorePersistenceCoordinator.StopReason.COMMITTED_NOT_APPLIED)stopCommittedPreparation();
+            else{cancelPreparation();message="今は操作できません。操作を取り消しました";}
+            return;
+        }
+        if(persistence.stopReason()==CorePersistenceCoordinator.StopReason.COMMITTED_NOT_APPLIED){stopCommittedPreparation();return;}
+        message=result==KeyRotationCoordinator.Result.PUBLISHED?(value.action==ManagementAction.REVOKE?"メンバーを取り消し、グループの鍵を入れ替えました":"グループの鍵を入れ替えました"):
+                result==KeyRotationCoordinator.Result.TOO_EARLY?"しばらく待ってから押してください":"入れ替えを完了できませんでした";
+    });}
     private void beginPreparation(Ticket ticket,int side,boolean invitation)throws Exception {
+        beginPreparation(ticket,side,invitation,null,true);
+    }
+    private void beginPreparation(Ticket ticket,int side,boolean invitation,List<byte[]> selected,boolean allUnknown)throws Exception {
+        if(managementPending!=null)throw new Unavailable("今は操作できません");
         var value=administration();
         try{
             var removed=new ArrayList<byte[]>();
-            if(!invitation)for(var binding:value.bindings())if(binding.state()==AdminBinding.State.UNKNOWN)removed.add(binding.administratorKey());
-            preparation=new AdministrationPreparation(value,managedSessions,removed,invitation,new AdministrationPreparation.Port(){
+            if(selected!=null)removed.addAll(selected);
+            else if(!invitation)for(var binding:value.bindings())if(binding.state()==AdminBinding.State.UNKNOWN)removed.add(binding.administratorKey());
+            preparation=new AdministrationPreparation(value,managedSessions,removed,invitation,allUnknown,new AdministrationPreparation.Port(){
                 public void own(AdminRecords.Record certificate){
                     boolean[] saved={false};
                     try{
                         saving(()->{boolean changed=store.saveLocalRenewal(group,certificate);saved[0]=changed;return changed;});
                         endpoint.updateLocalCertificate(certificate);
+                        if(removalBasis!=null)removalBasis.localCertificate=certificate.encode();
                     }catch(Exception failure){
                         if(saved[0])stopCommittedPreparation();
                         throw new IllegalStateException("証明書を保存できません");
@@ -595,6 +884,7 @@ final class LanController implements AutoCloseable {
                         if(group.management!=null)directory.restoreSnapshot(group.management.roster);
                         directory.saved(group.certificate);directory.saved(certificate);
                         saving(()->{store.saveDirectory(group,directory,group.management==null?Map.of():group.management.aliases);return null;});
+                        if(removalBasis!=null&&Crypto.equal(certificate.field(0),removalBasis.target.field(0)))removalBasis.targetReplacement=certificate;
                     }catch(Exception failure){throw new IllegalStateException("証明書を保存できません");}
                 }
                 public void send(byte[] peer,RenewalMessage message){
@@ -607,10 +897,13 @@ final class LanController implements AutoCloseable {
                     try{
                         // sessions → 管理操作 → AdminState の順を守り、端点の定期処理との逆順を防ぐ。
                         // Lock sessions, then administration, then AdminState to avoid inversion with endpoint polling.
-                        synchronized(sessions){saving(()->{
-                            prepared.publish(candidate,snapshot->{store.persistenceHooks(group).save(snapshot);saved[0]=true;},c->{});
-                            return null;
-                        });}
+                        synchronized(sessions){
+                            if(removalBasis!=null&&!managementCurrent(removalBasis))throw new Unavailable("確認の条件が変わりました");
+                            saving(()->{
+                                prepared.publish(candidate,snapshot->{store.persistenceHooks(group).save(snapshot);saved[0]=true;},c->{});
+                                return null;
+                            });
+                        }
                     }catch(Exception failure){
                         if(saved[0])stopCommittedPreparation();
                         throw new IllegalStateException("管理者の一覧を保存できません");
@@ -629,6 +922,7 @@ final class LanController implements AutoCloseable {
     private boolean preparationCurrent(){
         return preparation!=null&&group!=null&&endpoint!=null&&preparationGeneration==generation.get()
                 &&accepts(preparationTicket)&&Arrays.equals(preparationBasis,group.state.administrators().encode())
+                &&(removalBasis==null||managementCurrent(removalBasis))
                 &&group.isAdministrator()&&group.state.administrators().hasEntry(Crypto.ed25519Public(group.administratorSecret))
                 &&permits(CorePersistenceCoordinator.Operation.ADMINISTRATION);
     }
@@ -641,22 +935,89 @@ final class LanController implements AutoCloseable {
         if(!preparation.begun())return;
         try{
             if(!preparation.poll())return;
-            var ticket=preparationTicket;int side=invitationSide;
+            var ticket=preparationTicket;int side=invitationSide;boolean individual=individualRemoval;
             cancelPreparation();
             if(invitation)displayPreparedInvitation(ticket,side);
-            else message="対応のない管理者をすべて外しました";
+            else message=individual?"管理者から外しました":"対応のない管理者をすべて外しました";
             publish();
         }catch(RuntimeException failure){
             cancelPreparation();message=invitation?"招待を止めました。形式の切り替えを確かめてください":"操作を取り消しました。切り替えを完了できません";publish();
         }
     }
     private void cancelPreparation(){
+        managementPending=null;removalBasis=null;
+        individualRemoval=false;
         if(preparation!=null){preparation.close();preparation=null;}
         confirmation=null;managementBusy=false;preparationTicket=null;Crypto.wipe(preparationBasis);preparationBasis=null;
         main.accept(ui::hideManagementConfirmation);
     }
     private void stopCommittedPreparation(){
         committedNotApplied=true;storageStopped=true;reconnect.stop();stopNetwork();
+    }
+    private void clearAdministration(){
+        if(incomingAdministration!=null){incomingAdministration.close();incomingAdministration=null;}
+        administrationRequests.clear();outboundAdministration=null;
+    }
+    private void sendAdministration(byte[] peer,byte[] session,AdminControl value){
+        byte[] wire=value.envelope();
+        try{if(!endpoint.sendIfSession(peer,session,wire,CorePersistenceCoordinator.Operation.ADMINISTRATION))throw new IllegalStateException("相手に送れません");}
+        finally{Crypto.wipe(wire);}
+    }
+    private void receiveAdministration(byte[] peer,byte[] session,byte[] wire){
+        try{
+            var value=AdminControl.fromEnvelope(wire);var service=incoming();
+            var reply=service.receive(managedSessions,peer,session,value);
+            if(reply!=null){outboundAdministration=reply;sendAdministration(peer,session,reply);}
+            if(value.operation()==AdminControl.Operation.REQUEST||value.operation()==AdminControl.Operation.KEY_PROOF){
+                var certificate=managedSessions.peerCertificate(peer);if(certificate==null)return;
+                administrationRequests.put(memberName(peer),new AdministrationRequest(value,session,certificate));
+                var pending=managementPending;
+                if(pending!=null&&pending.step==ManagementStep.OFFER_WAIT&&managementCurrent(pending)
+                        &&Crypto.equal(peer,Crypto.blake2s(pending.target.field(0)))){
+                    approveAdministration(peer);cancelPreparation();
+                }
+            }
+        }catch(Exception rejected){reject++;}
+    }
+    private void approveAdministration(byte[] peer)throws Exception{
+        var request=administrationRequests.get(memberName(peer));
+        if(request==null||!Arrays.equals(request.session,managedSessions.sessionId(peer))
+                ||!Arrays.equals(request.certificate,managedSessions.peerCertificate(peer).encode()))throw new IllegalStateException("依頼の条件が変わりました");
+        var service=incoming();var candidate=service.approve(managedSessions,peer);boolean[] saved={false};long before=group.saveSeq;
+        try{
+            synchronized(managedSessions){saving(()->{
+                service.persist(candidate,snapshot->{store.persistenceHooks(group).save(snapshot);saved[0]=true;},value->{});return null;
+            });}
+        }catch(Exception failure){if(saved[0]||group.saveSeq>before)stopCommittedPreparation();throw failure;}
+        administrationRequests.remove(memberName(peer));
+        try{sendAdministration(peer,request.session,candidate.notice());}
+        catch(RuntimeException failure){stopCommittedPreparation();throw failure;}
+        message="管理者の権限を付けました";
+    }
+    private boolean saveGrantedAdministration(AdminRecords.Record list){
+        var proof=outboundAdministration;if(proof==null||incomingAdministration==null||group.isAdministrator())return false;
+        var binding=list.binding(proof.administratorKey());
+        if(binding==null||binding.state()!=AdminBinding.State.BOUND||!Crypto.equal(binding.memberId(),group.id())
+                ||!Arrays.equals(binding.possessionProof(),proof.encode()))return false;
+        var service=incomingAdministration;boolean[] saved={false};byte[][] activation={null};long before=group.saveSeq;
+        try{
+            synchronized(managedSessions){saving(()->{
+                var candidate=service.received(list,group.state.revocations());
+                service.persist(candidate,(snapshot,secret)->{
+                    if(secret.length!=32)throw new IllegalStateException("付与の根拠を確かめられません");
+                    activation[0]=secret.clone();
+                    try{store.saveMembership(group,snapshot,secret);saved[0]=true;}
+                    catch(Exception failure){throw new IllegalStateException("付与を保存できません");}
+                },value->{});return null;
+            });}
+            if(!service.isAdministrator())throw new IllegalStateException("付与を適用できません");
+            Crypto.wipe(group.administratorSecret);group.administratorSecret=activation[0];activation[0]=null;
+            outboundAdministration=null;refreshManagement=true;message="管理者の権限を保存しました";return true;
+        }catch(Exception failure){
+            if(saved[0]||group.saveSeq>before){committedNotApplied=true;storageStopped=true;reconnect.stop();}
+            else clearAdministration();
+            throw new IllegalStateException("付与を完了できません");
+        }finally{Crypto.wipe(activation[0]);}
     }
     private void receivePreparationMessage(byte[] peer,byte[] session,RenewalMessage message)throws Exception {
         if(message.operation()==RenewalMessage.Operation.PROOF_REPLY){
@@ -824,6 +1185,7 @@ final class LanController implements AutoCloseable {
             cfg.log=this::log;
             if(persistence!=null)cfg.management=new ManagedDhtExchange(owner,managed,persistence,managementUnion,clock,managementClock,runtime.nanos,random,store);
             if(cfg.management!=null)cfg.management.transport(recovery);
+            if(cfg.management!=null)cfg.management.beforeAdministrators(this::saveGrantedAdministration);
             final LanDht created;
             try{created=new LanDht(cfg);}catch(RuntimeException|LinkageError failure){if(cfg.management!=null)cfg.management.close();throw failure;}
             dht=created;
@@ -967,6 +1329,10 @@ final class LanController implements AutoCloseable {
             }
         }
         if(dht!=null)dht.step();
+        if(refreshManagement){refreshManagement=false;if(dht!=null){dht.close();dht=null;}startDht(endpoint,managedSessions,bound,generation.get());}
+        if(committedNotApplied){stopNetwork();publish();return;}
+        if(managementPending!=null&&!managementCurrent(managementPending))cancelPreparation();
+        pollNaming();
         pollPreparation();
         if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
             storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
@@ -1165,7 +1531,7 @@ final class LanController implements AutoCloseable {
         if(recoveringNetwork&&recoveryCannotContinue())recoveryUnavailable=true;
         if(persistence!=null&&persistence.stopReason()==CorePersistenceCoordinator.StopReason.COMMITTED_NOT_APPLIED)committedNotApplied=true;
         cancelPreparation();
-        if(incomingAdministration!=null){incomingAdministration.close();incomingAdministration=null;}
+        clearAdministration();refreshManagement=false;
         if(recovery!=null){recovery.close();recovery=null;}
         if(roster!=null){roster.close();roster=null;}managedSessions=null;recoveringNetwork=false;
         persistence=null;managementUnion=null;managementClock=null;joining=false;proofRequests.close();
@@ -1218,6 +1584,7 @@ final class LanController implements AutoCloseable {
         }
         Status status=new Status(text,ready,hasWifi,member,savedAdmin,busy||joining||managementBusy,endpoint!=null,store!=null&&store.erased(),store!=null&&store.erasing(),store==null?0:store.port(),certificateExpired||keyMissed,administrator&&savedMember&&!savedAdmin,dhtOn);
         status.unknown=unknown;status.operationsReady=stop.isEmpty();
+        status.managementAdmin=group!=null&&group.isAdministrator()&&group.state.administrators().hasEntry(Crypto.ed25519Public(group.administratorSecret));
         main.accept(()->{if(!stopped)ui.render(status);});
     }
     @Override public synchronized void close(){

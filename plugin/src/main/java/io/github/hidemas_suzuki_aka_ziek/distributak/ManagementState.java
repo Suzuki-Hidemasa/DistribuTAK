@@ -71,9 +71,21 @@ final class ManagementState {
             var old=group.management;var roster=old==null?new ArrayList<byte[]>():new ArrayList<>(old.roster);
             putCertificate(roster,group.certificate);if(group.peerCertificate!=null)putCertificate(roster,group.peerCertificate);
             return new ManagementState(generation,snapshot,state.revokedSubjects(),roster,legacyPermissions(group,old),
-                    old==null?Map.of():old.aliases,old==null?Map.of():old.reservations,old==null||!Arrays.equals(old.snapshot.announcement(),snapshot.announcement())||old.snapshot.administratorVersion()!=snapshot.administratorVersion()||!sameSubjects(old.union,state.revokedSubjects())?List.of():old.outgoing,
+                    retainedLabels(group,old,state),old==null?Map.of():old.reservations,old==null||!Arrays.equals(old.snapshot.announcement(),snapshot.announcement())||old.snapshot.administratorVersion()!=snapshot.administratorVersion()||!sameSubjects(old.union,state.revokedSubjects())?List.of():old.outgoing,
                     legacyBasis(group,old,state),CorePersistenceCoordinator.StopReason.NONE,old==null?null:old.checkpoint);
         }finally{state.clear();}
+    }
+    private static Map<String,String> retainedLabels(LanGroup group,ManagementState old,AdminState candidate){
+        if(old==null||old.aliases.isEmpty())return Map.of();
+        if(group.isAdministrator()&&!candidate.administrators().hasEntry(Crypto.ed25519Public(group.administratorSecret)))return Map.of();
+        var labels=new TreeMap<>(old.aliases);
+        labels.keySet().removeIf(identity->candidate.revokedSubjects().stream().anyMatch(id->Crypto.equal(id,Crypto.blake2s(Base64.getDecoder().decode(identity)))));
+        var previous=LanGroup.restore(group.groupId,group.urlAdmin,old.snapshot,group.clock);
+        try{
+            for(var binding:previous.administrators().bindings())if(binding.state()==AdminBinding.State.BOUND
+                    &&!candidate.administrators().hasEntry(binding.administratorKey()))labels.remove(Base64.getEncoder().encodeToString(binding.identityKey()));
+        }finally{previous.clear();}
+        return labels;
     }
     private static List<byte[]> legacyPermissions(LanGroup group,ManagementState old){
         var records=new ArrayList<byte[]>();if(old!=null)records.addAll(old.legacyPermissions);
@@ -81,6 +93,7 @@ final class ManagementState {
         return records;
     }
     ManagementState directory(MemberDirectory directory,Map<String,String> labels){
+        LocalLabels.validate(labels);
         var values=directory.snapshot();var identities=new HashSet<String>();
         for(byte[] encoded:values)identities.add(Base64.getEncoder().encodeToString(AdminRecords.decode(encoded).field(0)));
         if(!identities.containsAll(labels.keySet()))throw new SecurityException("呼び名の根拠がありません");
@@ -192,7 +205,7 @@ final class ManagementState {
             bytes(out,cp.winner);bytes(out,cp.received);target(out,cp.target,omitDigest);out.writeBoolean(cp.previous!=null);if(cp.previous!=null)target(out,cp.previous,false);
             out.writeBoolean(cp.previousSubjects!=null);if(cp.previousSubjects!=null)list(out,cp.previousSubjects);
             if(cp.basisWinner!=null){out.writeInt(cp.basisPrefix);out.writeLong(cp.basisAdministrators);out.writeLong(cp.basisRevocations);bytes(out,cp.basisWinner);}
-            out.flush();return buffer.toByteArray();
+            out.flush();LocalLabels.validate(aliases);return buffer.toByteArray();
         }
     }
     static ManagementState decode(byte[] plain)throws IOException{
@@ -217,6 +230,7 @@ final class ManagementState {
                 cp.basisPrefix=in.readInt();cp.basisAdministrators=in.readLong();cp.basisRevocations=in.readLong();cp.basisWinner=bytes(in,false);
             }
             if(in.available()!=0)throw new IOException("管理状態に余分な値があります");
+            LocalLabels.validate(aliases);
             return new ManagementState(generation,snapshot,union,roster,legacy,aliases,reservations,outgoing,basis,CorePersistenceCoordinator.StopReason.values()[reason],cp);
         }
     }

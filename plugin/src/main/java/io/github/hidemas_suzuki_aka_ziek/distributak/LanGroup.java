@@ -216,10 +216,16 @@ final class LanGroup implements AutoCloseable {
     byte[] encodeSix(ManagementState candidate,long generation,byte[] digest,byte[] key,long version)throws IOException {
         return encode(candidate,generation,digest,key,version);
     }
+    byte[] encodeMembership(ManagementState candidate,long generation,byte[] digest,byte[] secret)throws IOException {
+        return encode(candidate,generation,digest,null,keyVersion,secret);
+    }
     private byte[] encode(ManagementState candidate,long generation,byte[] digest,byte[] key,long version)throws IOException {
+        return encode(candidate,generation,digest,key,version,administratorSecret);
+    }
+    private byte[] encode(ManagementState candidate,long generation,byte[] digest,byte[] key,long version,byte[] secret)throws IOException {
         validate(true,candidate!=null);
         try(var buffer=new WipingOutput();var out=new DataOutputStream(buffer)) {
-            out.writeInt(candidate==null?5:6);out.writeInt(port);bytes(out,identitySecret);bytes(out,handshakeSecret);bytes(out,administratorSecret);
+            out.writeInt(candidate==null?5:6);out.writeInt(port);bytes(out,identitySecret);bytes(out,handshakeSecret);bytes(out,secret);
             bytes(out,key==null?groupKey:key);out.writeLong(version);bytes(out,groupId);bytes(out,urlAdmin);bytes(out,certificate.encode());
             if(candidate!=null){out.writeLong(generation);bytes(out,digest);}else{
             var snapshot=state.snapshot();var records=snapshot.records();out.writeInt(records.size());
