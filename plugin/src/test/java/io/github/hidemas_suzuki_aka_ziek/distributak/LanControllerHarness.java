@@ -92,7 +92,8 @@ final class LanControllerHarness implements AutoCloseable {
         public boolean saveLocalRenewal(LanGroup group,AdminRecords.Record certificate)throws Exception{if(failLocalRenewal)throw new java.io.IOException("test save failure");return managedStorage().saveLocalRenewal(group,certificate);}
         public boolean saveIssuedRenewal(LanGroup group,byte[] id,byte[] certificate)throws Exception{if(failIssuedRenewal)throw new java.io.IOException("test save failure");return managedStorage().saveIssuedRenewal(group,id,certificate);}
         public boolean savePeer(LanGroup group,AdminRecords.Record certificate,InetSocketAddress address)throws Exception{return managedStorage().savePeer(group,certificate,address);}
-        public void acceptRejoined(Future<?> future,LanGroup previous,LanGroup candidate,LanRuntime.Pending pending)throws Exception{groupStorage().acceptRejoined(previous,candidate,future,pending);}
+        java.util.function.Consumer<LanGroup> beforeAcceptRejoined=previous->{};
+        public void acceptRejoined(Future<?> future,LanGroup previous,LanGroup candidate,LanRuntime.Pending pending)throws Exception{beforeAcceptRejoined.accept(previous);groupStorage().acceptRejoined(previous,candidate,future,pending);}
         private SyncStateStorage syncStorage(){return new SyncStateStorage(envelope,sync,new SyncStateStorage.Source(){
             public boolean exists(){return sync.value!=null;}
             public byte[] read(){return sync.value.clone();}

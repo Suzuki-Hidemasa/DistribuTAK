@@ -7,6 +7,19 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class RecoveryControllerTest {
+    @Test public void recoveryCompletionDiscardsQueuedInputBeforeStartingNormalSynchronization()throws Exception {
+        try(var h=new LanControllerHarness()){
+            h.create();
+            ((CotSync)LanControllerHarness.field(h.controller,"sync")).close();
+            var sync=LanController.class.getDeclaredField("sync");sync.setAccessible(true);sync.set(h.controller,null);
+            var stop=LanController.class.getDeclaredMethod("stopDht");stop.setAccessible(true);stop.invoke(h.controller);
+            var limited=LanController.class.getDeclaredField("recoveringNetwork");limited.setAccessible(true);limited.setBoolean(h.controller,true);
+            var inbox=(SyncInbox)LanControllerHarness.field(h.controller,"inbox");
+            assertTrue(inbox.offer(0,new byte[32],new byte[16],new byte[]{1},0));assertEquals(1,inbox.size());
+            var finish=LanController.class.getDeclaredMethod("finishRecovery");finish.setAccessible(true);finish.invoke(h.controller);
+            assertEquals(0,inbox.size());assertNotNull(LanControllerHarness.field(h.controller,"sync"));
+        }
+    }
     @Test public void candidateLessStartupOpensOnlyLimitedTransportBeforeFirst()throws Exception{
         var disk=new LanControllerHarness.Disk(LanControllerHarness.freePort());disk.enableSix();
         try(var g=LanGroup.create(disk.port(),LanControllerHarness.CLOCK,new java.security.SecureRandom())){

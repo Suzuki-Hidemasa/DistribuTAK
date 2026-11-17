@@ -106,7 +106,8 @@ public final class CorePersistenceCoordinator {
         public List<byte[]> subjects(){return subjects==null?null:canonical(subjects);}
         @Override public String toString(){return "Recovery requirement";}
     }
-    private record Notice(byte[] session,long generation,long began,byte[] record){}
+    private record Notice(byte[] session,long generation,long began,byte[] record,byte[] operation){}
+    private ManagementOperations managementOperations;
     private final AdminState admin;
     private final SessionManager sessions;
     private final RevocationUnion revocations;
@@ -159,6 +160,15 @@ public final class CorePersistenceCoordinator {
      * Shared assembly slots for management pages and DHT.
      */
     public TransferResources transferResources(){return transferResources;}
+    /**
+     * 通信の寿命に1つの操作番号発行元を、通常の管理交換と最後の通知で共用する。
+     * <p>
+     * Shares one operation issuer per communication lifetime between normal management exchanges and final notices.
+     */
+    public ManagementOperations managementOperations(java.security.SecureRandom random){synchronized(sessions){
+        if(managementOperations==null)managementOperations=new ManagementOperations(random);
+        return managementOperations;
+    }}
     /**
      * 管理者一覧の候補を保存してから公開する。保存未確定の失敗では旧状態を保つ。
      * <p>
@@ -242,6 +252,14 @@ public final class CorePersistenceCoordinator {
      * Checks and starts an operation under the persistence-entry lock. Do not supply persistence I/O as action.
      */
     public void execute(Operation op,Runnable action){synchronized(sessions){require(op);action.run();}}
+    /**
+     * 送信直前の許可を再検査し、拒否された操作は実行せずfalseを返す。保存I/Oは渡さない。
+     * <p>
+     * Rechecks permission immediately before sending and returns false without executing denied operations. Do not supply persistence I/O.
+     */
+    public boolean tryExecute(Operation op,java.util.function.BooleanSupplier action){synchronized(sessions){
+        return permits(op)&&action.getAsBoolean();
+    }}
     boolean acceptsPackets(){return permits(Operation.HANDSHAKE);}
     boolean acceptsPersistingData(){return state==State.PERSISTING&&requirement==null&&!sessions.isClosed();}
     void requireReceivedData(byte[] wire){
@@ -325,11 +343,7 @@ public final class CorePersistenceCoordinator {
         try(persistence;addition){
             synchronized(sessions){
                 if(received){
-                    byte[] encoded=candidate.encode();
-                    if(encoded.length<=4*ManagementPage.PAGE_BYTES)for(byte[] subject:candidate.entries()){
-                        var verified=sessions.verifiedSession(subject);
-                        if(verified!=null)notices.put(new DhtId(subject),new Notice(verified.sessionId(),generation,deadlines.millis(),encoded));
-                    }
+                    reserveFinalNotices(candidate,generation,true);
                     addition.commit();
                     sessions.rejectRevokedPeers();
                 }
@@ -349,7 +363,7 @@ public final class CorePersistenceCoordinator {
             synchronized(sessions){
                 if(received&&(operation!=token||state!=State.PERSISTING||sessions.generation()!=generation))
                     throw new IllegalStateException("Stale persistence completion");
-                persistence.publish();if(!received)addition.commit();
+                persistence.publish();if(!received){addition.commit();reserveFinalNotices(candidate,generation,false);}
                 sessions.rejectRevokedPeers();sessions.refresh();
                 state=State.RUNNING;requirement=null;
                 if(announcement!=null)sessions.rotateGroupKey(key,announcement.keyVersion());
@@ -370,19 +384,44 @@ public final class CorePersistenceCoordinator {
             if(received||committed||durable)hooks.stopped(stopReason());return PersistenceResult.REJECTED;
         }
     }
+    private void reserveFinalNotices(AdminRecords.Record candidate,long generation,boolean received){
+        byte[] encoded=candidate.encode();
+        if(encoded.length>4*ManagementPage.PAGE_BYTES)return;
+        for(byte[] subject:candidate.entries()){
+            var verified=received?sessions.verifiedSession(subject):sessions.finalNoticeSession(subject);
+            if(verified!=null&&verified.generation()==generation){
+                if(managementOperations==null)managementOperations(new java.security.SecureRandom());
+                byte[] operation=managementOperations.next();
+                notices.put(new DhtId(subject),new Notice(verified.sessionId(),generation,deadlines.millis(),encoded,operation));
+            }
+        }
+    }
+    private Notice finalNotice(byte[] peer,byte[] session,long generation){
+        if(state==State.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS||sessions.isClosed()||sessions.generation()!=generation)return null;
+        var notice=notices.get(new DhtId(peer));long now=deadlines.millis();
+        return notice!=null&&notice.generation==generation&&Arrays.equals(session,notice.session)
+                &&now>=notice.began&&now-notice.began<1000?notice:null;
+    }
+    /**
+     * 失効の境界で固定した操作番号の写しを返す。専用送信口の接続までは予約の検査にだけ使う。
+     * <p>
+     * Returns a copy of the operation fixed at the revocation boundary, used only to inspect reservations until the dedicated port is connected.
+     */
+    public byte[] finalNoticeOperation(byte[] peer,byte[] session,long generation){synchronized(sessions){
+        var notice=finalNotice(peer,session,generation);return notice==null?null:notice.operation.clone();
+    }}
     /**
      * 署名済みの正確な失効ページだけに、対象の旧セッションで最長1秒の一方向通知を認める。送信予算は既存の通知部品が管理する。
      * <p>
      * Allows only exact signed revocation pages on the target's old session for at most one second. Existing notice components enforce send budgets.
      */
     public boolean maySendFinalNotice(byte[] peer,byte[] session,long generation,byte[] wire){synchronized(sessions){
-        if(state==State.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS)return false;
-        var notice=notices.get(new DhtId(peer));
-        if(notice==null||notice.generation!=generation||!Arrays.equals(session,notice.session)||deadlines.millis()-notice.began>=1000)return false;
+        var notice=finalNotice(peer,session,generation);
+        if(notice==null)return false;
         try{
             var page=ManagementPage.decodeEnvelope(wire);
-            if(page.kind()!=ManagementPage.Kind.REVOCATION||!Crypto.equal(page.group(),group))return false;
-            var expected=ManagementPage.split(ManagementPage.Kind.REVOCATION,page.operationId(),group,notice.record,
+            if(page.kind()!=ManagementPage.Kind.REVOCATION||!Crypto.equal(page.group(),group)||!Arrays.equals(page.operationId(),notice.operation))return false;
+            var expected=ManagementPage.split(ManagementPage.Kind.REVOCATION,notice.operation,group,notice.record,
                     AdminRecords.decode(notice.record).entries().size());
             return page.pageIndex()<expected.size()&&Arrays.equals(wire,expected.get(page.pageIndex()).envelope());
         }catch(RuntimeException invalid){return false;}

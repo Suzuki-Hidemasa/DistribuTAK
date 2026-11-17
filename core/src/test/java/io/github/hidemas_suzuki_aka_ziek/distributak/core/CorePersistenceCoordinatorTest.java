@@ -425,8 +425,9 @@ class CorePersistenceCoordinatorTest {
     @Test void finalNotificationIsTheOnlyRevokedPeerException(){
         try(var a=f.new Node(1);var b=f.new Node(2)){
             f.connect(a,b);var c=coordinator(a);byte[] session=a.sessions.sessionId(b.id);
-            var r=revoked(b.id);var pages=ManagementPage.split(ManagementPage.Kind.REVOCATION,new byte[16],f.group,r.encode(),1);
+            var r=revoked(b.id);
             c.receiveRevocations(r,hooks(()->{
+                var pages=ManagementPage.split(ManagementPage.Kind.REVOCATION,c.finalNoticeOperation(b.id,session,a.sessions.generation()),f.group,r.encode(),1);
                 assertTrue(c.maySendFinalNotice(b.id,session,a.sessions.generation(),pages.get(0).envelope()));
                 assertFalse(c.maySendFinalNotice(b.id,session,a.sessions.generation(),new byte[]{1}));
                 f.time.advance(1);assertFalse(c.maySendFinalNotice(b.id,session,a.sessions.generation(),pages.get(0).envelope()));

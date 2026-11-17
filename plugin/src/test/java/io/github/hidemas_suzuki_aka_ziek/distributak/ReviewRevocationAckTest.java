@@ -7,6 +7,15 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class ReviewRevocationAckTest {
+    @Test public void completedRecoveryRetainsReceiptForExactRetransmission()throws Exception {
+        try(var p=new RecoveryTransportTest.Pair()){
+            var request=RevocationsRecoveryRequest.decodeEnvelope(p.request());
+            var body=p.body(2,List.of(p.subject));
+            var saved=ManagementPage.split(ManagementPage.Kind.REVOCATION,request.operationId(),p.a.groupId,body.encode(),1).get(0);
+            receive(p,saved);assertEquals(CorePersistenceCoordinator.State.RUNNING,p.ca.state());assertEquals(1,p.saves);
+            p.requestWire.sent.clear();receive(p,saved);assertComplete(p);assertEquals(1,p.saves);
+        }
+    }
     private static ManagementPage page(RecoveryTransportTest.Pair p,AdminRecords.Record body,int operation){
         byte[] id=new byte[16];id[0]=(byte)operation;
         return ManagementPage.split(ManagementPage.Kind.REVOCATION,id,p.a.groupId,body.encode(),body.entries().size()).get(0);

@@ -61,6 +61,16 @@ public final class SessionManager implements AutoCloseable {
         this.coordinator=coordinator;
     }
     private void requireHandshake(){if(coordinator!=null)coordinator.require(CorePersistenceCoordinator.Operation.HANDSHAKE);}
+    synchronized boolean permitsAdministration(){return coordinator==null||coordinator.permits(CorePersistenceCoordinator.Operation.ADMINISTRATION);}
+    synchronized boolean execute(CorePersistenceCoordinator.Operation operation,java.util.function.BooleanSupplier action){
+        return coordinator==null?action.getAsBoolean():coordinator.tryExecute(operation,action);
+    }
+    // 保存確定後に時計を読み直さず、破棄する通常セッションの束縛だけを写す。
+    // Copy only the binding of the normal session being discarded, without reading clocks after commit.
+    synchronized VerifiedSession finalNoticeSession(byte[] id){
+        Peer peer=peers.get(key(id));
+        return !closed&&peer!=null&&peer.active!=null?new VerifiedSession(id,peer.active.id,generation):null;
+    }
     private void requirePeer(byte[] id){if(coordinator!=null&&coordinator.isRevoked(id))throw new SecurityException("Peer is revoked");}
     synchronized long keyVersion(){return version;}
     synchronized boolean matchesLocalRecipient(byte[] recipient,byte[] handshake){return Crypto.equal(localId,recipient)&&Crypto.equal(localPublic,handshake);}
