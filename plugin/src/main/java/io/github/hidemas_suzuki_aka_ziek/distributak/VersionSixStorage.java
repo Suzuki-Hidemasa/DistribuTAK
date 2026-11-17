@@ -145,7 +145,7 @@ final class VersionSixStorage {
     }
     synchronized void inspect(LanGroup group)throws Exception {
         var current=marker.inspect();var cp=group.management.checkpoint;
-        if(current.status()==StopMarker.Status.INVALID){group.storageBlocked=true;return;}
+        if(current.status()==StopMarker.Status.INVALID){group.storageBlocked=true;group.invalidStopMarker=true;return;}
         if(current.status()==StopMarker.Status.CLEAR){
             if(!cp.target.matches(current.target()))group.storageBlocked=true;
             return;

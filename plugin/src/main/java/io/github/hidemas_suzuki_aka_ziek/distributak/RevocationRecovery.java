@@ -38,6 +38,8 @@ final class RevocationRecovery implements AutoCloseable {
     private RevocationsRecoveryRequest request;
     private long progress,lastRequest=Long.MIN_VALUE;
     private int requests;
+    private boolean exhausted;
+    boolean exhausted(){return exhausted;}
     RevocationRecovery(LanGroup group,SessionManager sessions,CorePersistenceCoordinator coordinator,Clock clock,SecureRandom random,
                        Transport transport,CorePersistenceCoordinator.PersistenceHooks hooks){
         this(group,sessions,coordinator,clock,random,()->hooks,transport);
@@ -55,6 +57,7 @@ final class RevocationRecovery implements AutoCloseable {
     void poll(List<byte[]> candidates){
         coordinator.poll();sender.discardUnverifiedSessions(sessions);sender.rotating(sessions.hasRotatingSessions());
         if(coordinator.state()==CorePersistenceCoordinator.State.RECOVERING_REVOCATIONS){
+            exhausted=false;
             if(!coordinator.permits(CorePersistenceCoordinator.Operation.RECOVERY_REQUEST)){abandon();attempted.clear();return;}
             if(peer!=null&&clock.millis()-progress>=ManagementPageAssembler.PROGRESS_MILLIS)abandon();
             if(peer!=null&&session!=null&&!Arrays.equals(session,sessions.sessionId(peer))){
@@ -70,6 +73,7 @@ final class RevocationRecovery implements AutoCloseable {
                 catch(RuntimeException unavailable){abandon();continue;}
                 break;
             }
+            exhausted=peer==null;
             if(peer!=null){
                 var verified=sessions.verifiedSession(peer);
                 if(verified!=null&&request==null){

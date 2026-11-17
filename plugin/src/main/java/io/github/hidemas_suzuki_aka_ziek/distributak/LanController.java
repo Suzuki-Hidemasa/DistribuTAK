@@ -24,6 +24,8 @@ final class LanController implements AutoCloseable {
     interface Ui {
         void render(Status status);void qr(byte[] pixels);void hideSensitive();
         long screenEpoch();boolean foreground();
+        default void confirmUnknown(Object token,int count){}
+        default void hideManagementConfirmation(){}
     }
     static final class Ticket {
         final long screen,network,revision;final LanRuntime.Link link;
@@ -35,6 +37,8 @@ final class LanController implements AutoCloseable {
     static final class Status {
         final String text;final boolean ready,wifi,member,admin,busy,running,erased,erasing;final int port;
         final boolean rejoin,reinvite;
+        int unknown;
+        boolean operationsReady=true;
         /** 画面の「DHTを探し直す」ボタンを押せるか（DHT が動いているとき）。 */
         final boolean dht;
         Status(String text,boolean ready,boolean wifi,boolean member,boolean admin,boolean busy,boolean running,boolean erased,boolean erasing,int port,boolean rejoin,boolean reinvite){
@@ -94,6 +98,25 @@ final class LanController implements AutoCloseable {
     private boolean certificateExpired,keyMissed,revokedPeerForgotten;
     private boolean storageStopped;
     private String storageWarning="";
+    private boolean invalidStopMarker;
+    private long recoveryBegan;
+    private boolean committedNotApplied;
+    private boolean recoveryUnavailable;
+    private static final String RECOVERY_UNAVAILABLE="保存がいっぱい。取り直せないため通信を止めています。消去して新しい招待で入り直せます";
+    private AdministrationPreparation preparation;
+    private Ticket preparationTicket;
+    private long preparationGeneration;
+    private byte[] preparationBasis;
+    private boolean preparingInvitation;
+    private int invitationSide;
+    private Object confirmation;
+    private boolean managementBusy;
+    private GroupAdministration incomingAdministration;
+    private LanGroup unknownOwner;
+    private AdminRecords.Record unknownList,unknownLocal;
+    private byte[] unknownSecret;
+    private int unknowns;
+
     private long publicExpiry;private int publicRenewals;
     private static final String JOIN_FAILED="加入できませんでした。管理者側の状態も確認してください。管理者が招待を出せる場合は、新しい招待でやり直してください";
     private static final String RENEW_FAILED="証明書の更新に失敗しました。接続するを押してください";
@@ -189,7 +212,7 @@ final class LanController implements AutoCloseable {
     }
     private void rememberPublicGroup() {
         if(group==null||releasePending)return;administrator=group.isAdministrator();savedMember=true;savedAdmin=group.isAdministrator()&&group.peerCertificate==null;
-        storageStopped|=group.storageBlocked;
+        storageStopped|=group.storageBlocked;invalidStopMarker|=group.invalidStopMarker;
         publicGroup="\nグループ: "+LanSupport.shortId(group.groupId)+" 自分: "+LanSupport.shortId(group.id())
                 +"\n相手: "+(group.peerCertificate==null?"未登録":LanSupport.shortId(Crypto.blake2s(group.peerCertificate.field(0))));
         publicExpiry=group.certificate.expiresAt();publicRenewals=group.renewalCount;
@@ -199,6 +222,7 @@ final class LanController implements AutoCloseable {
     private boolean releasePending;
     private void releaseGroup(){
         rememberPublicGroup();
+        unknownOwner=null;unknownList=unknownLocal=null;unknownSecret=null;
         if(group!=null){releasePending=!group.tryClose();if(!releasePending)group=null;}
     }
     private void retryRelease(){if(releasePending)releaseGroup();}
@@ -328,7 +352,7 @@ final class LanController implements AutoCloseable {
         if(group.storageBlocked&&!limited)throw new Unavailable("保存がいっぱい");
         if(!limited)store.prepareNetwork(group);
         stopNetwork();
-        recoveringNetwork=limited;
+        recoveringNetwork=limited;recoveryUnavailable=false;if(limited)recoveryBegan=runtime.nanos.getAsLong();
         if(group.isAdministrator()&&!limited){
             var renewed=group.state.renewOwnCertificate(group.certificate,group.handshakeSecret,group.identitySecret,group.administratorSecret);
             if(renewed!=null)try{saving(()->store.saveLocalRenewal(group,renewed));}
@@ -368,7 +392,7 @@ final class LanController implements AutoCloseable {
             storageStopped=true;message="保存がいっぱい";stopNetwork();return;
         }
         try{
-            recoveringNetwork=false;storageStopped=false;inbox.clear();startSync();
+            recoveringNetwork=false;recoveryUnavailable=false;storageStopped=false;inbox.clear();startSync();
             startDht(endpoint,managedSessions,bound,generation.get());message="保存した所属を復元しました";
         }catch(Exception failure){message="保存がいっぱい";stopNetwork();}
     }
@@ -475,11 +499,11 @@ final class LanController implements AutoCloseable {
             // 登録を取り替える前にjoinの作業も止め、古いproviderの秘密を消す。
             openMember();
         }
-        if(group.certificate.format()==1) {
-            var next=group.state.prepareInvitationCertificate(group.certificate,group.handshakeSecret,group.identitySecret,group.administratorSecret);
-            if(next==null)throw new Unavailable("招待を作れません");
-            saving(()->store.saveLocalRenewal(group,next));endpoint.updateLocalCertificate(next);
-        }
+        if(preparation!=null)throw new Unavailable("確認中の操作を終えてください");
+        beginPreparation(ticket,imageSide,true);
+    });}
+    private void displayPreparedInvitation(Ticket ticket,int imageSide)throws Exception {
+        requireTicket(ticket);requireReady();
         byte[] totp=LanGroup.random(random);byte[] pixels=null;
         try(var value=new Invitation(bound.address().getAddress(),store.port(),Crypto.x25519Public(group.handshakeSecret),Crypto.ed25519Public(group.administratorSecret),totp,group.groupId)) {
             long epoch=generation.get();
@@ -494,7 +518,186 @@ final class LanController implements AutoCloseable {
             });
             message="招待QRを準備しました";
         }finally{Crypto.wipe(totp);Crypto.wipe(pixels);}
+    }
+    private GroupAdministration administration(){
+        boolean legacyMember=group.certificate.format()==1&&!group.state.administrators().hasAdminBindings()
+                &&group.state.administrators().entries().size()==1&&!group.isAdministrator()&&group.peerCertificate!=null;
+        var value=legacyMember?GroupAdministration.fromSaved(group.state,group.certificate,group.identitySecret,group.handshakeSecret,
+                group.administratorSecret,clock,runtime.nanos,random,group.peerCertificate)
+                :new GroupAdministration(group.state,group.certificate,group.identitySecret,group.handshakeSecret,
+                group.administratorSecret,clock,runtime.nanos,random);
+        try{
+            if(group.management!=null){
+                if(!legacyMember||!group.management.legacyAdministratorBasis.isEmpty())value.restoreLegacyAdministratorBasis(group.management.legacyAdministratorBasis);
+                if(value.isAdministrator())value.directory().restoreSnapshot(group.management.roster);
+            }
+            if(value.isAdministrator()){
+                value.directory().saved(group.certificate);
+                if(group.peerCertificate!=null)value.directory().saved(group.peerCertificate);
+                if(endpoint!=null)for(var peer:endpoint.knownPeers())value.directory().saved(peer.certificate());
+            }
+            return value;
+        }catch(RuntimeException failure){value.close();throw failure;}
+    }
+    private int unknownCount(){
+        if(group==null||!group.isAdministrator()||group.state.administrators().bindings().stream().noneMatch(b->b.state()==AdminBinding.State.UNKNOWN))return 0;
+        var list=group.state.administrators();
+        // 対応の入力が同じ間は件数を再利用し、表示のたびに署名検査を繰り返さない。
+        // Reuse the count while binding inputs are unchanged, avoiding signature checks on every render.
+        if(unknownOwner==group&&unknownList==list&&unknownLocal==group.certificate&&unknownSecret==group.administratorSecret)return unknowns;
+        try(var value=new GroupAdministration(group.state,group.certificate,group.identitySecret,group.handshakeSecret,
+                group.administratorSecret,clock,runtime.nanos,random)){
+            int count=(int)value.bindings().stream().filter(b->b.state()==AdminBinding.State.UNKNOWN).count();
+            unknownOwner=group;unknownList=list;unknownLocal=group.certificate;unknownSecret=group.administratorSecret;unknowns=count;
+            return count;
+        }
+        catch(RuntimeException unavailable){return 0;}
+    }
+    void removeUnknown(Ticket ticket){submit(()->{
+        requireTicket(ticket);requireReady();requireGroup();
+        if(endpoint==null||managedSessions==null||preparation!=null)throw new Unavailable("今は操作できません");
+        beginPreparation(ticket,0,false);
+        var token=confirmation;int count=unknownCount();
+        main.accept(()->{if(accepts(ticket)&&confirmation==token)ui.confirmUnknown(token,count);});
     });}
+    void confirmUnknown(Object token){submit(()->{
+        // 古い確認は無視し、進行中の操作と成功の表示を保つ。
+        // Ignore stale confirmations, preserving active work and its success message.
+        if(token==null||token!=confirmation||preparation==null)return;
+        if(!preparationCurrent()){
+            cancelPreparation();throw new Unavailable("確認の条件が変わりました。操作を取り消しました");
+        }
+        confirmation=null;
+        try{preparation.begin();}
+        catch(RuntimeException failure){cancelPreparation();message="操作を取り消しました。切り替えを始められません";return;}
+        managementBusy=true;pollPreparation();
+    });}
+    void cancelManagement(){enqueue(()->{cancelPreparation();message="操作を取り消しました";publish();});}
+    private void beginPreparation(Ticket ticket,int side,boolean invitation)throws Exception {
+        var value=administration();
+        try{
+            var removed=new ArrayList<byte[]>();
+            if(!invitation)for(var binding:value.bindings())if(binding.state()==AdminBinding.State.UNKNOWN)removed.add(binding.administratorKey());
+            preparation=new AdministrationPreparation(value,managedSessions,removed,invitation,new AdministrationPreparation.Port(){
+                public void own(AdminRecords.Record certificate){
+                    boolean[] saved={false};
+                    try{
+                        saving(()->{boolean changed=store.saveLocalRenewal(group,certificate);saved[0]=changed;return changed;});
+                        endpoint.updateLocalCertificate(certificate);
+                    }catch(Exception failure){
+                        if(saved[0])stopCommittedPreparation();
+                        throw new IllegalStateException("証明書を保存できません");
+                    }
+                }
+                public void issued(AdminRecords.Record certificate){
+                    try{
+                        var directory=new MemberDirectory(group.state);
+                        if(group.management!=null)directory.restoreSnapshot(group.management.roster);
+                        directory.saved(group.certificate);directory.saved(certificate);
+                        saving(()->{store.saveDirectory(group,directory,group.management==null?Map.of():group.management.aliases);return null;});
+                    }catch(Exception failure){throw new IllegalStateException("証明書を保存できません");}
+                }
+                public void send(byte[] peer,RenewalMessage message){
+                    byte[] session=endpoint.sessionId(peer),wire=message.encode();
+                    try{if(session!=null)endpoint.sendIfSession(peer,session,wire,CorePersistenceCoordinator.Operation.RENEWAL);}
+                    finally{Crypto.wipe(session);Crypto.wipe(wire);}
+                }
+                public void commit(GroupAdministration.Preparation prepared,GroupAdministration.Candidate candidate){
+                    boolean[] saved={false};var sessions=managedSessions;
+                    try{
+                        // sessions → 管理操作 → AdminState の順を守り、端点の定期処理との逆順を防ぐ。
+                        // Lock sessions, then administration, then AdminState to avoid inversion with endpoint polling.
+                        synchronized(sessions){saving(()->{
+                            prepared.publish(candidate,snapshot->{store.persistenceHooks(group).save(snapshot);saved[0]=true;},c->{});
+                            return null;
+                        });}
+                    }catch(Exception failure){
+                        if(saved[0])stopCommittedPreparation();
+                        throw new IllegalStateException("管理者の一覧を保存できません");
+                    }
+                }
+            });
+        }catch(RuntimeException failure){value.close();throw new Unavailable("最後の管理者を外すか、切り替えの条件を満たさない操作はできません");}
+        preparationTicket=ticket;preparationGeneration=generation.get();preparationBasis=group.state.administrators().encode();
+        preparingInvitation=invitation;invitationSide=side;confirmation=invitation?null:new Object();
+        if(invitation){
+            managementBusy=true;
+            try{preparation.begin();message="形式の切り替えを待っています";pollPreparation();}
+            catch(RuntimeException failure){cancelPreparation();throw new Unavailable("招待を止めました。形式の切り替えを確かめてください");}
+        }
+    }
+    private boolean preparationCurrent(){
+        return preparation!=null&&group!=null&&endpoint!=null&&preparationGeneration==generation.get()
+                &&accepts(preparationTicket)&&Arrays.equals(preparationBasis,group.state.administrators().encode())
+                &&group.isAdministrator()&&group.state.administrators().hasEntry(Crypto.ed25519Public(group.administratorSecret))
+                &&permits(CorePersistenceCoordinator.Operation.ADMINISTRATION);
+    }
+    private void pollPreparation()throws Exception {
+        if(preparation==null)return;
+        boolean invitation=preparingInvitation;
+        if(!preparationCurrent()){
+            cancelPreparation();message=invitation?"招待を止めました。確認の条件が変わりました":"確認の条件が変わりました。操作を取り消しました";publish();return;
+        }
+        if(!preparation.begun())return;
+        try{
+            if(!preparation.poll())return;
+            var ticket=preparationTicket;int side=invitationSide;
+            cancelPreparation();
+            if(invitation)displayPreparedInvitation(ticket,side);
+            else message="対応のない管理者をすべて外しました";
+            publish();
+        }catch(RuntimeException failure){
+            cancelPreparation();message=invitation?"招待を止めました。形式の切り替えを確かめてください":"操作を取り消しました。切り替えを完了できません";publish();
+        }
+    }
+    private void cancelPreparation(){
+        if(preparation!=null){preparation.close();preparation=null;}
+        confirmation=null;managementBusy=false;preparationTicket=null;Crypto.wipe(preparationBasis);preparationBasis=null;
+        main.accept(ui::hideManagementConfirmation);
+    }
+    private void stopCommittedPreparation(){
+        committedNotApplied=true;storageStopped=true;reconnect.stop();stopNetwork();
+    }
+    private void receivePreparationMessage(byte[] peer,byte[] session,RenewalMessage message)throws Exception {
+        if(message.operation()==RenewalMessage.Operation.PROOF_REPLY){
+            if(preparation!=null&&preparationCurrent())preparation.reply(peer,session,message);
+            return;
+        }
+        if(incomingAdministration!=null&&!Arrays.equals(incomingAdministration.certificate().encode(),group.certificate.encode())){
+            incomingAdministration.close();incomingAdministration=null;
+        }
+        if(incomingAdministration==null)incomingAdministration=administration();
+        if(message.operation()==RenewalMessage.Operation.PROOF_REQUEST){
+            var reply=incomingAdministration.receiveProofRequest(managedSessions,peer,session,message);
+            if(!renewalCandidate(()->proofRequests.remember(peer,session,message)))return;
+            endpoint.sendIfSession(peer,session,reply.encode(),CorePersistenceCoordinator.Operation.RENEWAL);
+        }else{
+            var certificate=incomingAdministration.receiveCertificateDelivery(managedSessions,peer,session,message,next->{
+                try{saving(()->store.saveLocalRenewal(group,next));}
+                catch(Exception failure){throw new IllegalStateException("証明書を保存できません");}
+            });
+            proofRequests.forget(peer);endpoint.updateLocalCertificate(certificate);endpoint.startIfPermitted(peer,CorePersistenceCoordinator.Operation.RECONNECT);
+        }
+    }
+    private boolean recoveryCannotContinue(){
+        long now=runtime.nanos.getAsLong();
+        return now<recoveryBegan||now-recoveryBegan>=240_000_000_000L||recovery!=null&&recovery.exhausted();
+    }
+    private String managementStopText(){
+        if(invalidStopMarker||group!=null&&group.invalidStopMarker)return "保存した停止の記録を確かめられません。通信を止めています";
+        if(committedNotApplied||persistence!=null&&persistence.stopReason()==CorePersistenceCoordinator.StopReason.COMMITTED_NOT_APPLIED)
+            return "保存した変更を適用できません。通信を止めています";
+        if(recoveryUnavailable)return RECOVERY_UNAVAILABLE;
+        if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.PERSISTING)
+            return recoveringNetwork?"保存がいっぱい。通信を止め、取り消しの一覧を保存しています":"保存中です。通信と操作を一時的に止めています";
+        if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.RECOVERING_REVOCATIONS){
+            if(recoveryCannotContinue())return RECOVERY_UNAVAILABLE;
+            return "保存がいっぱい。通信を止め、取り消しの一覧を取り直しています";
+        }
+        if(storageStopped||group!=null&&group.storageBlocked||persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED)
+            return "保存がいっぱい。通信を止めています";
+        return "";
+    }
     private void register(Invitation value,long epoch) {
         // provider は核の join スレッドで動く。告知を保存してから、公開記録と秘密の写しを固定する。
         // The provider runs on the core join thread. Persist the announcement before fixing public records and secret copies.
@@ -651,7 +854,7 @@ final class LanController implements AutoCloseable {
         finally{stopNetwork();releaseGroup();}
         if(wifi==null)wifi=runtime.network.open(()->enqueue(this::networkChanged));
         savedMember=false;savedAdmin=false;administrator=false;publicGroup="";certificateExpired=keyMissed=revokedPeerForgotten=false;storageWarning="";syncUidLimitReached=false;externalLimitReached=false;loadedExternal=null;
-        ready=selfCheckPassed;storageStopped=false;joining=false;tx=rx=reject=0;message="消去しました。グループを作るか、新しい招待を読んでください";
+        ready=selfCheckPassed;storageStopped=false;invalidStopMarker=false;committedNotApplied=false;recoveryUnavailable=false;joining=false;tx=rx=reject=0;message="消去しました。グループを作るか、新しい招待を読んでください";
         main.accept(()->{if(!stopped)ui.hideSensitive();});log("LAN_ERASED");
     }
     private void networkChanged(){
@@ -721,6 +924,7 @@ final class LanController implements AutoCloseable {
                 if(endpoint==null)return;
             }
             if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.CATCH_UP)){
+                pollPreparation();
                 message="保存がいっぱい";publish();return;
             }
             var peers=endpoint.knownPeers();
@@ -749,7 +953,7 @@ final class LanController implements AutoCloseable {
                 try{saving(()->{store.save(group);return null;});}catch(Exception e){log("LAN_REVOKED_PEER_SAVE_FAILED");}
                 message="相手は失効しました";
             }
-            keyMissed|=endpoint.sawNewerKeyVersion();renewPeer();showMemberFirst();
+            keyMissed|=endpoint.sawNewerKeyVersion();if(preparation==null||!preparation.begun())renewPeer();showMemberFirst();
             if(group.peerCertificate!=null) {
                 boolean current=endpoint.isEstablished(Crypto.blake2s(group.peerCertificate.field(0)));
                 if(current&&!established){
@@ -763,6 +967,7 @@ final class LanController implements AutoCloseable {
             }
         }
         if(dht!=null)dht.step();
+        pollPreparation();
         if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
             storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
         }
@@ -797,6 +1002,9 @@ final class LanController implements AutoCloseable {
         if(persistence!=null&&!persistence.permits(CorePersistenceCoordinator.Operation.RENEWAL))return;
         try {
             var message=RenewalMessage.decode(wire);
+            if(message.reason()!=RenewalMessage.Reason.AUTO_RENEWAL){
+                receivePreparationMessage(peer,session,message);return;
+            }
             if(message.operation()==RenewalMessage.Operation.PROOF_REPLY){receiveProofReply(peer,session,message);return;}
             if(group.peerCertificate==null||!Crypto.equal(peer,Crypto.blake2s(group.peerCertificate.field(0)))
                     ||!Crypto.equal(message.administrator(),group.urlAdmin)||!group.state.administrators().hasEntry(message.administrator())
@@ -954,6 +1162,10 @@ final class LanController implements AutoCloseable {
         main.accept(()->{if(!stopped)ui.hideSensitive();});
     }
     private void stopNetwork(){
+        if(recoveringNetwork&&recoveryCannotContinue())recoveryUnavailable=true;
+        if(persistence!=null&&persistence.stopReason()==CorePersistenceCoordinator.StopReason.COMMITTED_NOT_APPLIED)committedNotApplied=true;
+        cancelPreparation();
+        if(incomingAdministration!=null){incomingAdministration.close();incomingAdministration=null;}
         if(recovery!=null){recovery.close();recovery=null;}
         if(roster!=null){roster.close();roster=null;}managedSessions=null;recoveringNetwork=false;
         persistence=null;managementUnion=null;managementClock=null;joining=false;proofRequests.close();
@@ -978,13 +1190,15 @@ final class LanController implements AutoCloseable {
         if(stopped||(mainFailed.get()&&(!failure||mainFailurePublished)))return;
         if(mainFailed.get())mainFailurePublished=true;
         rememberPublicGroup();boolean hasWifi=selection()!=null,member=savedMember;
-        if(storageStopped||group!=null&&group.storageBlocked||persistence!=null&&!persistence.statusText().isEmpty())message="保存がいっぱい";
-        String text="DistribuTAK "+BuildConfig.VERSION_NAME+"\n"+selfCheck+"\nWi-Fi IPv4: "+(hasWifi?"利用可能":"なし／選べません")+"\n"+message;
+        String stop=managementStopText();String shownMessage=stop.isEmpty()?message:stop;
+        String text="DistribuTAK "+BuildConfig.VERSION_NAME+"\n"+selfCheck+"\nWi-Fi IPv4: "+(hasWifi?"利用可能":"なし／選べません")+"\n"+shownMessage;
         if(member){
-            text+=publicGroup;
-            if(!administrator||publicExpiry>clock.millis())text+="\n"+CertificateStatus.text(publicExpiry,clock.millis(),publicRenewals);
+            if(stop.isEmpty())text+=publicGroup;
+            if(stop.isEmpty()&&(!administrator||publicExpiry>clock.millis()))text+="\n"+CertificateStatus.text(publicExpiry,clock.millis(),publicRenewals);
             text+="\nセッション: "+(established?"確立":endpoint==null?"停止":"待機／握手中");
         }
+        int unknown=unknownCount();
+        if(unknown>0&&stop.isEmpty())text+="\n対応のない管理者: "+unknown+" 件";
         if(revokedPeerForgotten)text+="\n相手は失効しました";
         if(keyMissed)text+="\n新しいグループの鍵があるようです。管理者の新しい招待を読んでください";
         if(!storageWarning.isEmpty())text+="\n"+storageWarning;
@@ -1002,7 +1216,8 @@ final class LanController implements AutoCloseable {
             text+="\nDHT 経路表: "+dht.routingSize()+" 預かり: "+dht.storedRecords()+" 検証で拒否: "+dht.refusedRecords();
             String result=dht.result();if(result!=null)text+="\n"+result;
         }
-        Status status=new Status(text,ready,hasWifi,member,savedAdmin,busy||joining,endpoint!=null,store!=null&&store.erased(),store!=null&&store.erasing(),store==null?0:store.port(),certificateExpired||keyMissed,administrator&&savedMember&&!savedAdmin,dhtOn);
+        Status status=new Status(text,ready,hasWifi,member,savedAdmin,busy||joining||managementBusy,endpoint!=null,store!=null&&store.erased(),store!=null&&store.erasing(),store==null?0:store.port(),certificateExpired||keyMissed,administrator&&savedMember&&!savedAdmin,dhtOn);
+        status.unknown=unknown;status.operationsReady=stop.isEmpty();
         main.accept(()->{if(!stopped)ui.render(status);});
     }
     @Override public synchronized void close(){
