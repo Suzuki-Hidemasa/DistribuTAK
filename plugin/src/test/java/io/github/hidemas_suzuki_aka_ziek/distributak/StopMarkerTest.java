@@ -97,6 +97,49 @@ public class StopMarkerTest {
         var d=new Disk();assertEquals(StopMarker.Status.INVALID,d.marker().inspect().status());
         for(int length:new int[]{0,128,255,257}){d.bytes=new byte[length];assertEquals(StopMarker.Status.INVALID,d.marker().inspect().status());}
     }
+    @Test public void fileRegionAllowsOnlyMissingOrZeroInitialAllocationForMigration()throws Exception{
+        var path=Files.createTempFile("dtak-marker-test-",".bin");
+        try{
+            var region=new StopMarker.FileRegion(path.toFile(),()->{});var marker=new StopMarker(region,millis->{});
+            var target=target(1);
+            for(int length:new int[]{0,1,128,255,256,257,1024}){
+                Files.write(path,new byte[length]);
+                assertEquals(StopMarker.Status.INVALID,marker.inspect().status());
+                assertEquals(length<=StopMarker.BYTES,marker.canInitializeMigration(target.requiredVersion(),target.revocationDigest()));
+                if(length<=StopMarker.BYTES){
+                    marker.initializeMigration(target);assertEquals(StopMarker.Status.CLEAR,marker.inspect().status());
+                    assertEquals(StopMarker.BYTES,Files.size(path));
+                }else assertThrows(IOException.class,()->marker.initializeMigration(target));
+                if(length>0){
+                    byte[] nonzero=new byte[length];nonzero[length-1]=1;Files.write(path,nonzero);
+                    assertFalse(marker.canInitializeMigration(target.requiredVersion(),target.revocationDigest()));
+                    assertThrows(IOException.class,()->marker.initializeMigration(target));assertArrayEquals(nonzero,Files.readAllBytes(path));
+                }
+            }
+            Files.delete(path);assertEquals(StopMarker.Status.INVALID,marker.inspect().status());
+            assertTrue(marker.canInitializeMigration(target.requiredVersion(),target.revocationDigest()));
+            marker.initializeMigration(target);assertEquals(StopMarker.Status.CLEAR,marker.inspect().status());
+        }finally{Files.deleteIfExists(path);}
+    }
+    @Test public void loneClearMigrationRejectsDifferentVersion()throws Exception{
+        rejectLoneClearMismatch(true);
+    }
+    @Test public void loneClearMigrationRejectsDifferentRevocationDigest()throws Exception{
+        rejectLoneClearMismatch(false);
+    }
+    private void rejectLoneClearMismatch(boolean version)throws Exception{
+        for(int offset:new int[]{0,StopMarker.SLOT_BYTES}){
+            var disk=new Disk();var marker=disk.marker();var original=target(1);marker.initializeMigration(original);
+            disk.bytes[offset]^=1;byte[] before=disk.bytes.clone();int writes=disk.writes,syncs=disk.syncs;
+            assertEquals(StopMarker.Status.INVALID,marker.inspect().status());
+            byte[] digest=original.revocationDigest();if(!version)digest[0]^=1;
+            var different=new StopMarker.Target(original.saveSeq(),original.requiredVersion()+(version?1:0),
+                    original.stateDigest(),digest,original.reason());
+            assertFalse(marker.canInitializeMigration(different.requiredVersion(),different.revocationDigest()));
+            assertThrows(IOException.class,()->marker.initializeMigration(different));
+            assertArrayEquals(before,disk.bytes);assertEquals(writes,disk.writes);assertEquals(syncs,disk.syncs);
+        }
+    }
     @Test public void corruptChecksumAndUnknownFieldsAreRejected()throws Exception{
         var d=new Disk();var m=d.marker();m.initialize(target(1));byte[] valid=d.bytes.clone();
         for(int offset:new int[]{0,4,5,6,7,96}){

@@ -60,16 +60,32 @@ final class StopMarker {
      */
     synchronized void initializeMigration(Target target)throws IOException{
         byte[] existing=region.read();long previous=0;
+        if(!canInitializeMigration(existing,target.requiredVersion(),target.revocationDigest()))
+            throw new IOException("Existing stop requirements must be retained");
         if(existing!=null&&existing.length==BYTES){
             Slot a=decode(Arrays.copyOfRange(existing,0,SLOT_BYTES)),b=decode(Arrays.copyOfRange(existing,SLOT_BYTES,BYTES));
             for(Slot slot:new Slot[]{a,b})if(slot!=null){
-                if(slot.active||slot.target.requiredVersion()!=target.requiredVersion()||!Arrays.equals(slot.target.revocationDigest(),target.revocationDigest()))
-                    throw new IOException("Existing stop requirements must be retained");
                 previous=Math.max(previous,slot.sequence);
             }
             var current=inspect();if(current.status==Status.CLEAR&&target.matches(current.target))return;
         }
         retry(()->region.allocate());writePair(target,false,previous,0);
+    }
+    synchronized boolean canInitializeMigration(long requiredVersion,byte[] revocationDigest)throws IOException{
+        return canInitializeMigration(region.read(),requiredVersion,revocationDigest);
+    }
+    private static boolean canInitializeMigration(byte[] existing,long requiredVersion,byte[] revocationDigest){
+        // 初回確保の途中は未作成か全ゼロだけ。検証できたスロットがすべて clear で、版・R が合う場合は決定 B の規則を保つ。
+        // Initial allocation permits only missing or all-zero regions; decision B's rules are retained when all verified slots are clear and their versions and R match.
+        if(existing==null)return true;
+        if(existing.length>BYTES)return false;
+        if(Arrays.equals(existing,new byte[existing.length]))return true;
+        if(existing.length!=BYTES)return false;
+        Slot a=decode(Arrays.copyOfRange(existing,0,SLOT_BYTES)),b=decode(Arrays.copyOfRange(existing,SLOT_BYTES,BYTES));
+        if(a==null&&b==null)return false;
+        for(Slot slot:new Slot[]{a,b})if(slot!=null&&(slot.active||slot.target.requiredVersion()!=requiredVersion
+                ||!Arrays.equals(slot.target.revocationDigest(),revocationDigest)))return false;
+        return true;
     }
     synchronized void active(Target target)throws IOException{update(target,true);}
     synchronized void clear(Target target)throws IOException{update(target,false);}
@@ -138,7 +154,8 @@ final class StopMarker {
         public byte[] read()throws IOException{
             if(!file.exists())return null;
             try(var input=new RandomAccessFile(file,"r")){
-                if(input.length()!=BYTES)return new byte[0];byte[] result=new byte[BYTES];input.readFully(result);return result;
+                if(input.length()>BYTES)return new byte[BYTES+1];
+                byte[] result=new byte[(int)input.length()];input.readFully(result);return result;
             }
         }
         public void allocate()throws IOException{

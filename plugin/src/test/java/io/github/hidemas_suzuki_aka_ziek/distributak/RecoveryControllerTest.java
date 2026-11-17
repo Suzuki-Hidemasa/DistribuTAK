@@ -7,6 +7,47 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class RecoveryControllerTest {
+    @Test public void loneClearLegacySlotRetainsDecisionBAndCanOpenTransport()throws Exception {
+        for(int offset:new int[]{0,StopMarker.SLOT_BYTES}){
+            var disk=new LanControllerHarness.Disk(LanControllerHarness.freePort());
+            try(var g=LanGroup.create(disk.port(),LanControllerHarness.CLOCK,new java.security.SecureRandom())){
+                disk.save(g);disk.enableSix();disk.prepareNetwork(g);
+            }
+            disk.stopMarker.bytes[offset]^=1;
+            assertEquals(StopMarker.Status.INVALID,disk.stopMarker.marker().inspect().status());
+            try(var h=new LanControllerHarness(disk)){
+                assertEquals(StopMarker.Status.CLEAR,disk.stopMarker.marker().inspect().status());
+                assertNotNull(h.endpoint());assertEquals(1,h.link.opens);assertTrue(h.ui.last.operationsReady);
+            }
+        }
+    }
+    @Test public void corruptedLegacyMigrationMarkerStaysInvalidAndNeverOpensTransport()throws Exception {
+        var disk=new LanControllerHarness.Disk(LanControllerHarness.freePort());
+        try(var g=LanGroup.create(disk.port(),LanControllerHarness.CLOCK,new java.security.SecureRandom())){
+            disk.save(g);
+            assertEquals(5,java.nio.ByteBuffer.wrap(disk.envelope.open(disk.state.value)).getInt());
+            disk.enableSix();disk.prepareNetwork(g);
+            assertEquals(StopMarker.Status.CLEAR,disk.stopMarker.marker().inspect().status());
+        }
+        byte[] state=disk.state.value.clone(),settings=disk.settings.value.clone();
+        disk.stopMarker.bytes[0]^=1;
+        disk.stopMarker.bytes[StopMarker.SLOT_BYTES]^=1;
+        byte[] invalid=disk.stopMarker.bytes.clone();int writes=disk.stopMarker.writes;
+        assertEquals(StopMarker.Status.INVALID,disk.stopMarker.marker().inspect().status());
+        try(var h=new LanControllerHarness(disk)){
+            assertEquals(StopMarker.Status.INVALID,disk.stopMarker.marker().inspect().status());
+            assertNull(h.endpoint());assertEquals(0,h.link.opens);
+            assertNull(LanControllerHarness.field(h.controller,"sync"));
+            assertNull(LanControllerHarness.field(h.controller,"dht"));
+            assertNull(LanControllerHarness.field(h.controller,"recovery"));
+            assertTrue(h.ui.last.text.contains("保存した停止の記録を確かめられません。通信を止めています"));
+            assertFalse(h.ui.last.operationsReady);
+            h.offset.addAndGet(300_000_000_000L);h.tick();h.tick();
+            assertNull(h.endpoint());assertEquals(0,h.link.opens);assertEquals(writes,disk.stopMarker.writes);
+            assertArrayEquals(invalid,disk.stopMarker.bytes);assertArrayEquals(state,disk.state.value);
+            assertArrayEquals(settings,disk.settings.value);assertFalse(disk.erased);
+        }
+    }
     @Test public void recoveryCompletionDiscardsQueuedInputBeforeStartingNormalSynchronization()throws Exception {
         try(var h=new LanControllerHarness()){
             h.create();

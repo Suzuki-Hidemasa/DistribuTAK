@@ -146,6 +146,10 @@ final class VersionSixStorage {
     synchronized void inspectLegacy(LanGroup group)throws IOException{
         var current=marker.inspect();
         if(current.status()==StopMarker.Status.ACTIVE){block(group,current.target());return;}
+        if(current.status()==StopMarker.Status.INVALID&&!marker.canInitializeMigration(group.state.revocations().version(),
+                CorePersistenceCoordinator.revocationDigest(group.state.revokedSubjects()))){
+            group.storageBlocked=true;group.invalidStopMarker=true;return;
+        }
         if(current.status()==StopMarker.Status.CLEAR&&(!Crypto.equal(current.target().revocationDigest(),CorePersistenceCoordinator.revocationDigest(group.state.revokedSubjects()))
                 ||current.target().requiredVersion()!=group.state.revocations().version()))group.storageBlocked=true;
     }
