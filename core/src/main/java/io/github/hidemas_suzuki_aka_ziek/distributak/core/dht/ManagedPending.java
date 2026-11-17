@@ -34,6 +34,12 @@ public final class ManagedPending {
     private final List<Entry> entries=new ArrayList<>();
     private int bytes;
     private boolean retrying;
+    /**
+     * 期限内の保留候補の写しを、依存取得の計画にだけ返す。適用には再検証が必要。
+     * <p>
+     * Returns a copy of unexpired pending candidates solely for dependency planning; application requires revalidation.
+     */
+    public synchronized List<ManagedDhtRecord> candidates(){checkReentry();expire();return entries.stream().map(Entry::record).toList();}
     public ManagedPending(Clock clock){this(clock,null,null);}
     /**
      * 現在の送り手と署名者の資格に基づいて保留枠を分ける。

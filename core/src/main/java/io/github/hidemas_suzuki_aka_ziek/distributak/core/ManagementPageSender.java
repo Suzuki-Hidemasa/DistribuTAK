@@ -20,6 +20,7 @@ import java.util.Set;
  */
 public final class ManagementPageSender implements AutoCloseable {
     @FunctionalInterface public interface Sender {boolean send(byte[] peer,byte[] session,byte[] plaintext);}
+    @FunctionalInterface public interface Completion {void completed(byte[] peer,byte[] session,long generation,ManagementPage.Kind kind,byte[] target);}
     public enum Offer {ACCEPTED,FULL,BUSY,PEER_BUSY,INVALID,DHT_TRANSFER_OR_INVITATION}
     public static final long MAX_HELD_BYTES=8L*1024*1024;
     private static final long TOTAL_MS=240000,PROGRESS_MS=30000;
@@ -49,6 +50,13 @@ public final class ManagementPageSender implements AutoCloseable {
     private final List<Out> pending=new ArrayList<>(),active=new ArrayList<>();
     private boolean rotating;
     private long held,completed,failed,last=Long.MIN_VALUE;
+    private Completion completion=(p,s,g,k,t)->{};
+    /**
+     * 検証済みの完了通知先を設定する。失敗や部分ACKでは呼ばない。
+     * <p>
+     * Sets the validated completion listener, never called for failure or partial acknowledgments.
+     */
+    public void onCompletion(Completion listener){completion=Objects.requireNonNull(listener);}
     public ManagementPageSender(byte[] group,Clock clock,ManagementSendBudget budget,Sender sender){
         Crypto.length(group,32);this.group=group.clone();this.clock=Objects.requireNonNull(clock);
         this.budget=Objects.requireNonNull(budget);this.sender=Objects.requireNonNull(sender);
@@ -77,8 +85,25 @@ public final class ManagementPageSender implements AutoCloseable {
             if(current==null||current.generation()!=out.generation||!Arrays.equals(current.sessionId(),out.session))remove(out,false);
         }
     }
+    /**
+     * 取り消した保存済み対象の送信だけを解放する。他の対象の期限は変えない。
+     * <p>
+     * Releases only sends for a cancelled persisted object without changing other object deadlines.
+     */
+    public void discardTarget(ManagementPage.Kind kind,byte[] target){
+        for(var out:all())if(out.pages.get(0).kind()==kind&&Arrays.equals(out.pages.get(0).objectDigest(),target))remove(out,false);
+    }
     @Override public void close(){for(var out:all())remove(out,false);}
     public Offer offer(byte[] peer,byte[] session,long generation,ManagementPage.Kind kind,byte[] operation,byte[] data,int entries,boolean notice){
+        return offer(peer,session,generation,kind,operation,data,entries,notice,clock.millis());
+    }
+    /**
+     * 保存済み配送の最初の投入時刻を保ち、枠待ちで期限を延ばさない。
+     * <p>
+     * Preserves the original offer time of saved delivery without extending its deadline while waiting for a slot.
+     */
+    public Offer offer(byte[] peer,byte[] session,long generation,ManagementPage.Kind kind,byte[] operation,byte[] data,int entries,boolean notice,long offeredAt){
+        if(offeredAt>clock.millis()||clock.millis()-offeredAt>=TOTAL_MS)return Offer.INVALID;
         Crypto.length(peer,32);Crypto.length(session,16);Crypto.length(operation,16);Objects.requireNonNull(kind);
         if(data==null||data.length<1||data.length>ManagementPage.MAX_TOTAL_BYTES||entries<0||entries>ManagementPage.MAX_ENTRIES)return Offer.INVALID;
         var plan=deliveryPlan((data.length+1023)/1024);if(plan!=Offer.ACCEPTED)return plan;
@@ -89,7 +114,7 @@ public final class ManagementPageSender implements AutoCloseable {
         if(!isActive(key)&&!queued.contains(key)&&queued.size()>=32)return queued.size()>32?Offer.BUSY:Offer.FULL;
         if(held+data.length>MAX_HELD_BYTES)return Offer.BUSY;
         var pages=ManagementPage.split(kind,operation,group,data,entries);
-        pending.add(new Out(peer,session,generation,pages,notice,clock.millis()));held+=data.length;return Offer.ACCEPTED;
+        pending.add(new Out(peer,session,generation,pages,notice,offeredAt));held+=data.length;return Offer.ACCEPTED;
     }
     private List<Out> all(){var result=new ArrayList<>(pending);result.addAll(active);return result;}
     private boolean isActive(DhtId peer){return active.stream().anyMatch(o->o.peer.equals(peer));}
@@ -97,7 +122,10 @@ public final class ManagementPageSender implements AutoCloseable {
         var peers=new HashSet<DhtId>();for(var o:pending)if(!isActive(o.peer))peers.add(o.peer);return peers;
     }
     private void remove(Out o,boolean success){
+        var first=o.pages.get(0);byte[] session=o.session.clone();
         active.remove(o);pending.remove(o);held-=o.bytes();Crypto.wipe(o.session);for(var page:o.pages)page.wipeData();if(success)completed++;else failed++;
+        try{if(success)completion.completed(o.peer.bytes(),session,o.generation,first.kind(),first.objectDigest());}
+        finally{Crypto.wipe(session);}
     }
     private void promoteSamePeer(DhtId peer,long now){
         var next=pending.stream().filter(o->o.peer.equals(peer)&&!o.blocked(rotating)).min(Comparator.comparingInt(Out::rank)).orElse(null);

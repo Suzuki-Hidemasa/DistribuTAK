@@ -234,12 +234,24 @@ public final class ManagementPageAssembler {
         return null;
     }
     /**
+     * 依存本体を待つ告知を未確定の完了枠へ置き、元の期限を保つ。
+     * <p>
+     * Holds an announcement awaiting dependencies in its unconfirmed completion slot, preserving original deadlines.
+     */
+    public synchronized void retryAnnouncement(byte[] peer,byte[] session,long generation,ManagementPage page,byte[] body,long receivedAt){
+        if(page.kind()!=ManagementPage.Kind.ANNOUNCEMENT)return;
+        retainBody(peer,session,generation,page,body,receivedAt);
+    }
+    /**
      * 応答の送信待ちが満杯なら、未確定の完了記録にsummary本体を元の期限内だけ保持する。
      * <p>
      * Retains a summary body within original deadlines in its unconfirmed completion record when response sending is full.
      */
     public synchronized void retryRosterSummary(byte[] peer,byte[] session,long generation,ManagementPage page,byte[] body,long receivedAt){
         if(page.kind()!=ManagementPage.Kind.ROSTER_SUMMARY)return;
+        retainBody(peer,session,generation,page,body,receivedAt);
+    }
+    private void retainBody(byte[] peer,byte[] session,long generation,ManagementPage page,byte[] body,long receivedAt){
         if(body==null||body.length!=page.totalBytes()||body.length>RosterMessage.MAX_BYTES)throw new IllegalArgumentException("Invalid summary body");
         poll();var key=new DhtId(peer);
         for(var record:completed)if(!record.confirmed&&record.matches(key,page,session,generation)){
@@ -258,7 +270,7 @@ public final class ManagementPageAssembler {
      * Wipes pending bodies that lost binding or authority without changing other object assemblies.
      */
     public synchronized void pruneRosterSummaryRetries(RosterCurrent current){
-        poll();for(var record:new java.util.ArrayList<>(completed))if(record.summaryBody!=null){
+        poll();for(var record:new java.util.ArrayList<>(completed))if(record.first.kind()==ManagementPage.Kind.ROSTER_SUMMARY&&record.summaryBody!=null){
             boolean retain=false;
             try{retain=current.test(record.peer.bytes(),record.session.clone(),record.generation);}
             finally{if(!retain)record.clearSummary();}
@@ -269,7 +281,7 @@ public final class ManagementPageAssembler {
      * <p>
      * Wipes all pending summary plaintext on owner close.
      */
-    public synchronized void clearRosterSummaryRetries(){for(var record:completed)record.clearSummary();}
+    public synchronized void clearRosterSummaryRetries(){for(var record:completed)if(record.first.kind()==ManagementPage.Kind.ROSTER_SUMMARY)record.clearSummary();}
     /**
      * 既存の有限な完了記録だけを調べ、名簿ページの内容まで正確に一致する再送へACKを返す。
      * <p>

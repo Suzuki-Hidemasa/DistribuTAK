@@ -46,6 +46,7 @@ public final class DhtDispatcher implements DhtTransport {
         final long generation;
         long deadline;
         boolean transferring;
+        java.util.function.BooleanSupplier current=()->true;
         final List<DhtId> carry;
         /** 呼び出し側が結果を待つ口（直接の FIND_VALUE・STORE だけ）。1回だけ呼ぶ。 */
         Consumer<Object> done;
@@ -194,7 +195,14 @@ public final class DhtDispatcher implements DhtTransport {
     public void configureManaged(ManagedDhtStore store){
         if(managedStore!=null)throw new IllegalStateException("Management DHT already connected");
         managedStore=Objects.requireNonNull(store);
-        managedTransfers=new DhtTransfers(group,(peer,session,wire)->link.send(peer,session,DhtWire.management(wire)),ticker,rng,null,
+        managedTransfers=new DhtTransfers(group,(peer,session,wire)->{
+            var message=DhtWire.parse(wire);
+            if(message.op()==DhtWire.Op.TRANSFER&&message.transferKind()==DhtWire.TransferKind.STORE){
+                var request=pending.get(keyOf(new DhtId(peer),message.transferId()));
+                if(request==null||!request.current.getAsBoolean())return false;
+            }
+            return link.send(peer,session,DhtWire.management(wire));
+        },ticker,rng,null,
                 (peer,id)->managedValueExpected(peer,peers.sessionOf(peer),id),transferResources,new ManagedTransferSink(){
             @Override public void started(DhtId peer,byte[] session,long boundGeneration,DhtWire.TransferKind kind,byte[] id,long started){
                 if(kind!=DhtWire.TransferKind.VALUE||boundGeneration!=generation)return;
@@ -232,13 +240,21 @@ public final class DhtDispatcher implements DhtTransport {
      * Publishes a management record over existing STORE or Transfer and reports the whole-record result once.
      */
     public boolean storeManaged(Contact destination,byte[] encoded,Consumer<DhtWire.StoreStatus> done){
-        if(managedStore==null)return false;
+        return storeManaged(destination,encoded,done,()->true);
+    }
+    /**
+     * 保存済み候補の取消後は、残るSTORE断片も新たに送らない。
+     * <p>
+     * Sends no further STORE chunks after cancellation of a persisted candidate.
+     */
+    public boolean storeManaged(Contact destination,byte[] encoded,Consumer<DhtWire.StoreStatus> done,java.util.function.BooleanSupplier current){
+        if(managedStore==null||!current.getAsBoolean())return false;
         final ManagedDhtRecord record;try{record=ManagedDhtRecord.verifyStructure(encoded,group);}catch(RuntimeException invalid){return false;}
         var peer=destination.id();var session=usable(peer);if(session==null)return false;
-        if(record.transport()==ManagedDhtRecord.Transport.STORE)return open(Kind.MANAGED_STORE,DhtWire.Op.STORE,0,peer,session,record.key(),0,
-                ticker.getAsLong()+DhtLimits.RPC_NANOS,null,rid->DhtWire.management(DhtWire.store(group,rid,record.key(),encoded)),result->done.accept((DhtWire.StoreStatus)result));
+        if(record.transport()==ManagedDhtRecord.Transport.STORE)return register(Kind.MANAGED_STORE,DhtWire.Op.STORE,0,peer,session,record.key(),0,
+                ticker.getAsLong()+DhtLimits.RPC_NANOS,null,rid->link.send(peer.bytes(),session,DhtWire.management(DhtWire.store(group,rid,record.key(),encoded))),result->done.accept((DhtWire.StoreStatus)result),current);
         return register(Kind.MANAGED_STORE,DhtWire.Op.STORE,0,peer,session,record.key(),0,ticker.getAsLong()+240*SECOND,null,
-                rid->managedTransfers.start(peer,session,DhtWire.TransferKind.STORE,rid,encoded),result->done.accept((DhtWire.StoreStatus)result));
+                rid->managedTransfers.start(peer,session,DhtWire.TransferKind.STORE,rid,encoded),result->done.accept((DhtWire.StoreStatus)result),current);
     }
     /**
      * 現在の相手へ管理記録を要求し、束縛と全体を検証した結果だけを返す。
@@ -246,14 +262,22 @@ public final class DhtDispatcher implements DhtTransport {
      * Requests a management record from a current peer and returns only a bound, fully verified result.
      */
     public boolean findManagedFrom(Contact destination,DhtId target,Consumer<ManagedDhtRecord> done){
-        if(managedStore==null)return false;var peer=destination.id();var session=usable(peer);if(session==null)return false;
-        return open(Kind.MANAGED_VALUE,DhtWire.Op.FIND_VALUE,0,peer,session,target,0,ticker.getAsLong()+DhtLimits.RPC_NANOS,null,
-                rid->DhtWire.management(DhtWire.findValue(group,rid,target)),result->done.accept((ManagedDhtRecord)result));
+        return findManagedFrom(destination,target,done,()->true);
+    }
+    /**
+     * 呼出側の待ちが終わったら、VALUEやTransferを検証・保存へ進めない。
+     * <p>
+     * Prevents VALUE or Transfer validation and persistence after the caller's wait ends.
+     */
+    public boolean findManagedFrom(Contact destination,DhtId target,Consumer<ManagedDhtRecord> done,java.util.function.BooleanSupplier current){
+        if(managedStore==null||!current.getAsBoolean())return false;var peer=destination.id();var session=usable(peer);if(session==null)return false;
+        return register(Kind.MANAGED_VALUE,DhtWire.Op.FIND_VALUE,0,peer,session,target,0,ticker.getAsLong()+DhtLimits.RPC_NANOS,null,
+                rid->link.send(peer.bytes(),session,DhtWire.management(DhtWire.findValue(group,rid,target))),result->done.accept((ManagedDhtRecord)result),current);
     }
     private boolean managedValueExpected(DhtId peer,byte[] session,byte[] id){
         var p=pending.get(keyOf(peer,id));
         return p!=null&&p.kind==Kind.MANAGED_VALUE&&p.generation==generation&&Arrays.equals(p.session,session)
-                &&ticker.getAsLong()-p.deadline<0;
+                &&ticker.getAsLong()-p.deadline<0&&p.current.getAsBoolean();
     }
     private void answerManaged(AuthenticatedPeer peer,byte[] session,DhtWire.Message message){
         if(!responder.admitBeforeAnswering(peer))return;
@@ -601,6 +625,10 @@ public final class DhtDispatcher implements DhtTransport {
     }
     private boolean register(Kind kind,DhtWire.Op op,long coreId,DhtId peer,byte[] session,DhtId target,int page,long deadline,
             List<DhtId> carry,java.util.function.Function<byte[],Boolean> send,Consumer<Object> done){
+        return register(kind,op,coreId,peer,session,target,page,deadline,carry,send,done,()->true);
+    }
+    private boolean register(Kind kind,DhtWire.Op op,long coreId,DhtId peer,byte[] session,DhtId target,int page,long deadline,
+            List<DhtId> carry,java.util.function.Function<byte[],Boolean> send,Consumer<Object> done,java.util.function.BooleanSupplier current){
         if(pending.size()>=MAX_PENDING)return false;
         int mine=0;
         for(Pending p:pending.values()) {
@@ -616,7 +644,7 @@ public final class DhtDispatcher implements DhtTransport {
         }
         if(key==null)return false;
         Pending entry=new Pending(kind,op,coreId,peer,session,target,page,generation,deadline,carry);
-        entry.done=done;
+        entry.done=done;entry.current=Objects.requireNonNull(current);
         pending.put(key,entry);
         boolean sent;
         try {
@@ -792,7 +820,7 @@ public final class DhtDispatcher implements DhtTransport {
         Pending p=pending.get(key);
         if(p==null){unsolicited=inc(unsolicited);return;}
         long now=ticker.getAsLong();
-        if(now-p.deadline>=0){pending.remove(key);expired=inc(expired);expireOne(p);return;}
+        if(now-p.deadline>=0||!p.current.getAsBoolean()){pending.remove(key);expired=inc(expired);expireOne(p);return;}
         if(!Arrays.equals(p.session,session)||((p.kind==Kind.MANAGED_VALUE||p.kind==Kind.MANAGED_STORE)!=m.managed())||!compatible(p,m)){mismatched=inc(mismatched);return;}
         if(p.generation!=generation||source.generation()!=AuthenticatedPeer.UNBOUND&&source.generation()!=generation) {
             pending.remove(key);stale=inc(stale);
@@ -927,7 +955,7 @@ public final class DhtDispatcher implements DhtTransport {
     /** 自分が出したFIND_VALUEへの答えとして届く大きな転送だけを受ける（request_id = transfer_id）。 */
     private boolean valueExpected(DhtId peer,byte[] transferId) {
         Pending p=pending.get(keyOf(peer,transferId));
-        return p!=null&&p.kind==Kind.CORE&&p.op==DhtWire.Op.FIND_VALUE&&ticker.getAsLong()-p.deadline<0;
+        return p!=null&&p.kind==Kind.CORE&&p.op==DhtWire.Op.FIND_VALUE&&ticker.getAsLong()-p.deadline<0&&p.current.getAsBoolean();
     }
 
     // ---- 周期・状態の変化 ----
@@ -939,7 +967,7 @@ public final class DhtDispatcher implements DhtTransport {
         var it=pending.values().iterator();
         while(it.hasNext()) {
             Pending p=it.next();
-            if(now-p.deadline>=0){it.remove();dead.add(p);expired=inc(expired);}
+            if(now-p.deadline>=0||!p.current.getAsBoolean()){it.remove();dead.add(p);expired=inc(expired);}
         }
         for(Pending p:dead)expireOne(p);
         tickStarted();

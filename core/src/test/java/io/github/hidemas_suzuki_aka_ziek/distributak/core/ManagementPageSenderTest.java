@@ -39,6 +39,22 @@ class ManagementPageSenderTest {
     final ManagementSendBudget budget=new ManagementSendBudget(clock);
     final List<Frame> frames=new ArrayList<>();
     final ManagementPageSender sender=new ManagementPageSender(GROUP,clock,budget,(p,s,d)->{frames.add(new Frame(clock.now,p,d));return true;});
+    @Test void completionListenerRunsOnceOnlyAfterTheBoundSentTargetCompletes(){
+        var targets=new ArrayList<byte[]>();
+        sender.onCompletion((p,s,g,k,t)->{
+            assertArrayEquals(peer(1),p);assertArrayEquals(SESSION,s);assertEquals(7,g);
+            assertEquals(ManagementPage.Kind.REVOCATION,k);targets.add(t);
+        });
+        offer(1,1,ManagementPage.Kind.REVOCATION,10,1,false);sender.poll();
+        var page=ManagementPage.decodeEnvelope(frames.get(0).data());
+        var complete=new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{0},true);
+        sender.acknowledge(peer(1),SESSION,8,complete);assertTrue(targets.isEmpty());
+        sender.acknowledge(peer(1),op(4),7,complete);assertTrue(targets.isEmpty());
+        sender.acknowledge(peer(1),SESSION,7,new ManagementPageAck(GROUP,page.operationId(),page.objectDigest(),new int[]{0},false));
+        assertTrue(targets.isEmpty());sender.acknowledge(peer(1),SESSION,7,complete);
+        assertEquals(1,targets.size());assertArrayEquals(page.objectDigest(),targets.get(0));
+        sender.acknowledge(peer(1),SESSION,7,complete);sender.close();assertEquals(1,targets.size());
+    }
     @Test void replacingSessionReleasesOldPendingAndActiveWithoutForgettingOtherPeers(){
         assertEquals(ManagementPageSender.Offer.ACCEPTED,offer(1,1,ManagementPage.Kind.REVOCATION,10,1,false));sender.poll();
         assertEquals(ManagementPageSender.Offer.ACCEPTED,offer(1,2,ManagementPage.Kind.ANNOUNCEMENT,20,1,false));
@@ -227,6 +243,15 @@ class ManagementPageSenderTest {
         var resumed=ManagementPage.decodeEnvelope(frames.get(frames.size()-1).data());
         clock.now=271000;sender.acknowledge(peer(1),SESSION,7,progressAck(resumed,new int[]{0},true));
         assertEquals(0,sender.completed());sender.poll();assertEquals(2,sender.failed());
+    }
+
+    @Test void delayedAnnouncementOfferKeepsTheOriginalSavedDeliveryDeadline(){
+        clock.now=239999;
+        assertEquals(ManagementPageSender.Offer.ACCEPTED,sender.offer(peer(1),SESSION,7,ManagementPage.Kind.ANNOUNCEMENT,op(1),new byte[10],0,false,0));
+        sender.poll();assertEquals(1,frames.size());clock.now=240000;sender.poll();
+        assertEquals(0,sender.heldBytes());assertEquals(1,sender.failed());
+        assertEquals(ManagementPageSender.Offer.INVALID,sender.offer(peer(1),SESSION,7,ManagementPage.Kind.ANNOUNCEMENT,op(2),new byte[10],0,false,0));
+        assertEquals(1,frames.size());
     }
 
 }

@@ -19,6 +19,7 @@ import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.SessionManager;
+import io.github.hidemas_suzuki_aka_ziek.distributak.core.ManagementEnvelopeFields;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.UdpEndpoint;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.AuthenticatedPeer;
 import io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.Contact;
@@ -238,10 +239,22 @@ final class LanDht implements DhtLink {
         return active()&&cfg.management!=null&&cfg.management.allowed()&&dispatcher.storeManaged(destination,encoded,done);
     }
     /**
-     * 管理記録を現在の相手から取得する。運用への鍵の適用は行わない。
+     * 既存の全体送信枠が満杯か調べる。上限は変えない。
      * <p>
-     * Fetches a management record from a current peer without applying operational keys.
+     * Checks whether the existing global send slots are full without changing their limit.
      */
+    boolean managementSendFull(){return dispatcher.pendingCount()>=DhtDispatcher.MAX_PENDING;}
+    /**
+     * 保存済み候補の現在の資格を確かめながら管理記録を公開する。
+     * <p>
+     * Publishes a management record while checking the current eligibility of its saved candidate.
+     */
+    boolean publishManaged(Contact destination,byte[] record,Consumer<DhtWire.StoreStatus> done,BooleanSupplier current){
+        return active()&&cfg.management!=null&&cfg.management.allowed()&&dispatcher.storeManaged(destination,record,done,current);
+    }
+    boolean findManaged(Contact destination,DhtId target,Consumer<io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.ManagedDhtRecord> done,BooleanSupplier current){
+        return active()&&cfg.management!=null&&cfg.management.allowed()&&dispatcher.findManagedFrom(destination,target,done,current);
+    }
     boolean findManaged(Contact destination,DhtId target,Consumer<io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.ManagedDhtRecord> done){
         return active()&&cfg.management!=null&&cfg.management.allowed()&&dispatcher.findManagedFrom(destination,target,done);
     }
@@ -377,6 +390,7 @@ final class LanDht implements DhtLink {
         }
         node.poll();
         dispatcher.poll();
+        if(cfg.management!=null)cfg.management.poll(this);
         publisher.poll(now);
         seedStoredPeer();
         runHandshakes(now);
@@ -764,6 +778,20 @@ final class LanDht implements DhtLink {
             }
         }
         return null;
+    }
+    boolean receiveAnnouncement(byte[] peer,byte[] session,byte[] wire,long receivedAt,RevocationRecovery transport){
+        if(ManagementEnvelopeFields.field(wire)!=ManagementEnvelopeFields.SIGNED_ANNOUNCEMENT)return false;
+        if(cfg.management!=null){var ack=cfg.management.receiveAnnouncement(peer,session,wire,receivedAt);
+            if(ack!=null&&transport!=null)transport.announcementAck(peer,session,ack);}
+        return true;
+    }
+    List<Contact> managementPeers(){
+        var result=new ArrayList<Contact>();
+        for(var peer:node.routing().nearest(self,256)){
+            byte[] session=wire.sessionId(peer.id().bytes());
+            if(dispatcher.peers().isYes(peer.id())&&session!=null&&wire.authenticated(peer.id().bytes(),session)!=null)result.add(peer.contact());
+        }
+        return result;
     }
 
     /** 端点と管理側のセッションを包む本物の口。 */

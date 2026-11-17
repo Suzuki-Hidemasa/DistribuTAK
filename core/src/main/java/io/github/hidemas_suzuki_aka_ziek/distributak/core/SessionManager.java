@@ -700,6 +700,14 @@ public final class SessionManager implements AutoCloseable {
             if(p.active!=null && !p.rotating) { p.rotationAt=now;p.rotating=true; }
         }
     }
+    /**
+     * 旧セッションの猶予中だけ管理ページの送信を抑える。既存の起点は変えない。
+     * <p>
+     * Pauses management pages only while old sessions are in their grace period, without changing its existing start.
+     */
+    public synchronized boolean hasRotatingSessions(){
+        refresh();for(var peer:peers.values())if(peer.active!=null&&peer.rotating)return true;return false;
+    }
     /** refresh を行うため、照会だけでも期限・失効で相手または全体が閉じることがある。 */
     public synchronized boolean isEstablished(byte[] id) { refresh();Peer p=peers.get(key(id));return p!=null && p.active!=null; }
     /** 握手の全検査を通した確立済みの相手だけを表す。SessionManager だけが作る（DHT の相手の入口。核 C1）。 */

@@ -19,6 +19,8 @@ final class RosterExchange implements AutoCloseable {
         long started,progress,revision=-1;
         int failures;boolean done,awaitingAck,intervalDone;
         RosterMessage.Summary finishedRequest;
+        long completionRevision=-1;
+        byte[] completionTarget;
         Peer(SessionManager.VerifiedSession value){session=value.sessionId();generation=value.generation();}
     }
     private final LanGroup group;
@@ -35,9 +37,13 @@ final class RosterExchange implements AutoCloseable {
     private final Map<ArrivalKey,Arrival> arrivals=new HashMap<>();
     private long conflicts;
     private List<byte[]> loadedRoster;
+    private AdminRecordStore.Snapshot managementBasis;
+    private long managementRevision;
     RosterExchange(LanGroup group,SessionManager sessions,CorePersistenceCoordinator coordinator,Clock clock,LanRuntime.Storage storage,RevocationRecovery transport){
         this.group=group;this.sessions=sessions;this.coordinator=coordinator;this.clock=clock;this.storage=storage;this.transport=transport;
         directory=new MemberDirectory(group.state);acks=new RosterAckQueue(clock);reload();
+        managementBasis=group.management==null?group.state.snapshot():group.management.snapshot;
+        transport.onRevocationsDelivered(this::revocationsDelivered);
         if(group.isAdministrator()&&group.management==null){directory.saved(group.certificate);if(group.peerCertificate!=null)directory.saved(group.peerCertificate);}
     }
     void reload(){
@@ -103,6 +109,7 @@ final class RosterExchange implements AutoCloseable {
         coordinator.pruneRosterSummaryRetries(this::administrator);
         if(!coordinator.permits(CorePersistenceCoordinator.Operation.ROSTER)||!group.isAdministrator()){acks.close();coordinator.clearRosterAckRetries();return;}
         reload();
+        managementChanged();
         flushAcks();
         for(var retry:coordinator.rosterAckRetries()){
             if(!administrator(retry.peer())||acks.offer(retry.peer(),retry.session(),retry.generation(),retry.ack(),retry.received(),retry.began()))
@@ -127,6 +134,32 @@ final class RosterExchange implements AutoCloseable {
         }
         arrivals.entrySet().removeIf(entry->!retained.contains(entry.getKey().peer())||clock.millis()-entry.getValue().began()>=240000);
         peers.entrySet().removeIf(entry->!retained.contains(entry.getKey())||!current(entry.getKey().bytes(),entry.getValue()));
+    }
+    private boolean sameManagement(AdminRecordStore.Snapshot a,AdminRecordStore.Snapshot b){
+        if(a.administratorVersion()!=b.administratorVersion()||a.revocationVersion()!=b.revocationVersion()
+                ||!Arrays.equals(a.revocations(),b.revocations())||a.records().size()!=b.records().size())return false;
+        for(int i=0;i<a.records().size();i++)if(!Arrays.equals(a.records().get(i),b.records().get(i)))return false;
+        return true;
+    }
+    private void managementChanged(){
+        if(group.management==null||sameManagement(managementBasis,group.management.snapshot))return;
+        managementBasis=group.management.snapshot;managementRevision=Math.incrementExact(managementRevision);
+        peers.forEach((id,peer)->{if(current(id.bytes(),peer))recover(peer);});
+    }
+    private void recover(Peer peer){
+        if(peer.failures<3||peer.request!=null||peer.awaitingAck)return;
+        peer.failures=0;peer.after=new byte[0];peer.done=false;
+    }
+    /**
+     * 対象を照合した失効配送の完了だけで、同じ管理改訂につき一度再開する。
+     * <p>
+     * Resumes once per management revision only after target-bound revocation delivery completion.
+     */
+    void revocationsDelivered(byte[] id,byte[] session,long generation,byte[] target){
+        managementChanged();var peer=peers.get(new DhtId(id));
+        if(peer==null||generation!=peer.generation||!Crypto.equal(session,peer.session)||!current(id,peer)
+                ||peer.completionRevision==managementRevision)return;
+        peer.completionRevision=managementRevision;peer.completionTarget=target.clone();recover(peer);
     }
     boolean receive(byte[] id,byte[] session,byte[] wire,long receivedAt){
         int field=ManagementEnvelopeFields.field(wire);

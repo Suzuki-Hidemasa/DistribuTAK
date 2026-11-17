@@ -159,6 +159,67 @@ public final class CorePersistenceCoordinator {
      * Shared assembly slots for management pages and DHT.
      */
     public TransferResources transferResources(){return transferResources;}
+    /**
+     * 管理者一覧の候補を保存してから公開する。保存未確定の失敗では旧状態を保つ。
+     * <p>
+     * Persists an administrator-list candidate before publication, retaining the old state on uncommitted failure.
+     */
+    public boolean receiveAdministrators(AdminRecords.Record candidate,PersistenceHooks hooks){
+        Objects.requireNonNull(hooks);
+        final AdminState prepared;final AdminRecordStore.Snapshot base;final AdminState.PreparedPersistence reservation;
+        final long token,generation;
+        synchronized(sessions){
+            require(Operation.ADMINISTRATION);sessions.refresh();
+            base=admin.snapshot();prepared=admin.fork();
+            if(!prepared.acceptAdministrators(candidate,v->{}))return false;
+            reservation=admin.preparePersistence(base,prepared);generation=sessions.generation();
+            token=++operation;state=State.PERSISTING;
+        }
+        boolean durable=false;
+        try(reservation){
+            hooks.save(prepared.snapshot());durable=true;
+            synchronized(sessions){
+                sessions.refresh();
+                if(operation!=token||state!=State.PERSISTING||sessions.isClosed()||sessions.generation()!=generation
+                        ||!AdminState.sameSnapshot(base,admin.snapshot())||!admin.continuesChain(candidate))
+                    throw new IllegalStateException("Stale administrator persistence");
+            }
+            reservation.save();
+            synchronized(sessions){
+                if(operation!=token||state!=State.PERSISTING||sessions.isClosed()||sessions.generation()!=generation
+                        ||!admin.continuesChain(candidate))throw new IllegalStateException("Stale administrator publication");
+                reservation.publish();sessions.refresh();state=State.RUNNING;
+            }
+            return true;
+        }catch(RuntimeException failure){
+            if(durable)committedKeyFailure(hooks);
+            else synchronized(sessions){if(operation==token&&state==State.PERSISTING)state=State.RUNNING;}
+            return false;
+        }
+    }
+    /**
+     * 告知の全体を共通枠で組み立て、検証と有限保管後にだけ完了を確認する。
+     * <p>
+     * Assembles announcements in shared resources, confirming completion only after validation and bounded storage.
+     */
+    public ManagementPageAck receiveAnnouncementPage(byte[] peer,byte[] session,long generation,ManagementPage page,long receivedAt,
+            java.util.function.Predicate<KeyAnnouncement> admit){
+        synchronized(sessions){
+            if(!permits(Operation.KEY_ANNOUNCEMENT)||isRevoked(peer)||!current(peer,session,generation)
+                    ||page.kind()!=ManagementPage.Kind.ANNOUNCEMENT||page.totalEntries()!=0)return null;
+            var result=recoveryPages.receiveAt(peer,session,generation,page,receivedAt);
+            if(result.completed()==null)return result.ack();
+            try(var completed=result.completed()){
+                byte[] bytes=completed.data();
+                try{if(!admit.test(KeyAnnouncement.decode(bytes))){
+                    recoveryPages.retryAnnouncement(peer,session,generation,page,bytes,receivedAt);return null;
+                }}
+                finally{Crypto.wipe(bytes);}
+                if(!current(peer,session,generation)||!permits(Operation.KEY_ANNOUNCEMENT))return null;
+                return recoveryPages.confirm(peer,session,generation,page);
+            }catch(RuntimeException invalid){recoveryPages.reject(peer,session,generation,page);return null;}
+        }
+    }
     public StopReason stopReason(){synchronized(sessions){return stopReason;}}
     public String statusText(){synchronized(sessions){
         return state==State.STORAGE_FAILED&&stopReason==StopReason.STORAGE_FAILED||state==State.RECOVERING_REVOCATIONS||state==State.PERSISTING&&requirement!=null?"保存がいっぱい":"";

@@ -122,6 +122,16 @@ class SessionManagerTest {
             assertTrue(a.sessions.isEstablished(b.id));
         }
     }
+    @Test void managementPauseUsesTheExistingRotationDeadline() throws Exception {
+        try(var a=new Node(1);var b=new Node(2)) {
+            connect(a,b);
+            var method=SessionManager.class.getMethod("hasRotatingSessions");
+            assertEquals(false,method.invoke(a.sessions));a.sessions.rotateGroupKey(key(40),1);
+            assertEquals(true,method.invoke(a.sessions));time.advance(179);
+            a.sessions.rotateGroupKey(key(41),2);assertEquals(true,method.invoke(a.sessions));
+            time.advance(1);assertEquals(false,method.invoke(a.sessions));
+        }
+    }
     @Test void rotationDeadlineAndTransportAgeBoundary() throws Exception {
         try(var a=new Node(1);var b=new Node(2)) {
             connect(a,b);var old=secrets(a,b);a.sessions.rotateGroupKey(key(40),1);
