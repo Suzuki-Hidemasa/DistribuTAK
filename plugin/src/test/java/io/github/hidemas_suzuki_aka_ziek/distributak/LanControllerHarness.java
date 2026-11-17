@@ -28,7 +28,7 @@ final class LanControllerHarness implements AutoCloseable {
     static final class Ui implements LanController.Ui {
         volatile long epoch;boolean front=true,sensitive;int qrs;byte[] pixels;LanController.Status last;
         boolean failQr,failRender,failHide;int renders,hides;byte[] transferred;
-        final List<String> managementTexts=new ArrayList<>(),choiceLabels=new ArrayList<>();
+        final List<String> managementTexts=new ArrayList<>(),choiceLabels=new ArrayList<>(),statusTexts=new ArrayList<>();
         Object confirmation;int confirmationCount,confirmations;
         public void confirmUnknown(Object token,int count){confirmation=token;confirmationCount=count;confirmations++;}
         public void confirmManagement(Object token,String title,String text){confirmation=token;confirmations++;managementTexts.add(title);managementTexts.add(text);}
@@ -40,7 +40,7 @@ final class LanControllerHarness implements AutoCloseable {
             choiceToken=token;choices=values;managementTexts.add(title);for(var value:values)choiceLabels.add(value.label);
         }
         public void hideManagementConfirmation(){confirmation=null;}
-        public void render(LanController.Status status){renders++;if(failRender)throw new IllegalStateException("private UI detail");last=status;}
+        public void render(LanController.Status status){renders++;if(failRender)throw new IllegalStateException("private UI detail");last=status;statusTexts.add(status.text);}
         public void qr(byte[] image){transferred=image;if(failQr)throw new IllegalStateException("private QR detail");qrs++;sensitive=true;Crypto.wipe(pixels);pixels=image.clone();Crypto.wipe(image);}
         public void hideSensitive(){hides++;epoch++;sensitive=false;Crypto.wipe(pixels);pixels=null;if(failHide)throw new IllegalStateException("private cleanup detail");}
         public long screenEpoch(){return epoch;}

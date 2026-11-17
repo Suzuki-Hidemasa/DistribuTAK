@@ -3,9 +3,11 @@ id: DTAK-19
 title: >-
   既存の出力から短い識別値を外す: rememberPublicGroup の画面表示と LanSupport.receipt の受信ログ（DTAK-9 9b
   から持ち越し）
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-17 08:33'
+updated_date: '2026-11-17 08:40'
 labels:
   - security
 dependencies: []
