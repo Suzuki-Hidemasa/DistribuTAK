@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 00:24'
-updated_date: '2026-11-16 14:25'
+updated_date: '2026-11-16 22:47'
 labels:
   - stage-13
 dependencies: []
@@ -79,4 +79,6 @@ PRC-163 のタスク PRC-21.21（ADR 0030 答え 167 の第13段）の未了の�
 第7回（2026-11-16 開始）: 保存形式 6・管理ファイル・settings 版 3・停止の印 256B（3 回/100 ms）・U1 復旧の保存側・M1 保存中のセッション保持・履歴の上限。ブランチ worktree-dtak9-r7（base 1c24fee）。目標: out/agents/goals/dtak9-r7-20261116.md。作業者は先に設計メモを agmsg で送る。第8回（配線）・第9回（UI）・実機は範囲外。
 
 第7回（保存形式 6・停止の印・M1）: 版 6 の管理ファイル・停止の印 256B・settings 版 3・版 5 からの移行・保存中のセッション保持を実装。二者のレビュー（Astra・Fable）の必修 4 件（空き不足と履歴上限での active 先書き、保存相手の失効直後の中断、項目 7 の一覧への移行）を直した。履歴の上限は仮の値（65,536 件・12 MiB・管理平文 16 MiB）。候補を作れない受信は全ゼロ target の active で止める。全ゼロ target からの復旧条件（取り直した一覧の版が受信版以上・保存済み R を包含）は第8回で決める。核 1,543 件・plugin 485 件、失敗 0、lint エラー 0・NewApi 0。版 6 の保存後は旧 APK へ戻せない（docs/state-v6-migration.md）。未決: INVALID の表示文言は第9回。
+
+第8b-2a回 済み（PR #14、main=7ccd881）。持ち越し: LanBehaviourFixTest.peerWithoutSessionDoesNotAdvanceReviewAndRenewsAfterConnecting が過去に全体実行で 1 回落ちた（単独では通る。8b-1・8b-2a では再現せず）。原因の調査は別のタスクで行う。
 <!-- SECTION:NOTES:END -->

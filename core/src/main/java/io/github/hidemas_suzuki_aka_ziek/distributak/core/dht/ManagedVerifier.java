@@ -23,6 +23,16 @@ import java.util.List;
  * checked using the revocation union and dependency bodies.
  */
 public final class ManagedVerifier {
+    private boolean observeAnnouncements;
+
+    /**
+     * 告知の観察だけはR不足を許し、包みの運用の検査は保つ。
+     * <p>
+     * Allows missing union coverage only for observing announcements, preserving checks for operational wraps.
+     */
+    public ManagedVerifier observingAnnouncements(){
+        var result=new ManagedVerifier(trust,clock,revocations,dependencies);result.observeAnnouncements=true;return result;
+    }
     /** 先の時刻として許す幅（5 分）。 / How far ahead a signing time may be (five minutes). */
     public static final long FUTURE_SKEW_MILLIS=300_000L;
     private final TrustedAdmins trust;
@@ -159,17 +169,21 @@ public final class ManagedVerifier {
         return named!=null&&Crypto.equal(Crypto.blake2s(named.signedBytes()),digest)?null:ManagedVerdict.INVALID;
     }
     private record AnnouncementCheck(ManagedVerdict verdict,AdminRecords.Record body){}
-    private AnnouncementCheck checkAnnouncement(KeyAnnouncement announcement,byte[] group) {
+    private AnnouncementCheck checkAnnouncement(KeyAnnouncement announcement,byte[] group) {return checkAnnouncement(announcement,group,false);}
+    private AnnouncementCheck checkAnnouncement(KeyAnnouncement announcement,byte[] group,boolean observing) {
         if(!Crypto.equal(announcement.group(),group)||!announcement.hasValidSignature()||tooFarAhead(announcement.signedAt()))
             return new AnnouncementCheck(ManagedVerdict.INVALID,null);
         var authority=adminReference(announcement.adminVersion(),announcement.adminDigest());
         if(authority!=null)return new AnnouncementCheck(authority,null);
+        if(observing&&(announcement.adminVersion()!=trust.latest().version()
+                ||!Crypto.equal(announcement.adminDigest(),Crypto.blake2s(trust.latest().signedBytes()))))
+            return new AnnouncementCheck(ManagedVerdict.INVALID,null);
         announcement.verify(group,trust.latest().entries());
         var body=dependencies.revocations(announcement.revocationVersion(),announcement.revocationDigest());
         if(body==null)return new AnnouncementCheck(ManagedVerdict.NEEDS_ANNOUNCEMENT,null);
         body.verify(AdminRecords.Kind.REVOCATIONS,group,trust.latest().entries());
         if(body.format()!=2||body.version()!=announcement.revocationVersion()||tooFarAhead(body.signedAt())
-                ||!Crypto.equal(Crypto.blake2s(body.signedBytes()),announcement.revocationDigest())||!revocations.covers(body))
+                ||!Crypto.equal(Crypto.blake2s(body.signedBytes()),announcement.revocationDigest())||!observing&&!revocations.covers(body))
             return new AnnouncementCheck(ManagedVerdict.INVALID,null);
         return new AnnouncementCheck(null,body);
     }
@@ -197,7 +211,7 @@ public final class ManagedVerifier {
         if(store&&!boundTo(latest,candidate.signer(),memberId))return ManagedVerdict.INVALID;
         if(candidate.kind()==DhtKeys.KEY_ANNOUNCEMENT){
             var announcement=candidate.announcement();
-            var result=checkAnnouncement(announcement,candidate.group());if(result.verdict()!=null)return result.verdict();
+            var result=checkAnnouncement(announcement,candidate.group(),observeAnnouncements);if(result.verdict()!=null)return result.verdict();
             int order=held==null?1:KeyAnnouncement.compare(announcement,held.announcement());
             return ranked(candidate,held,order);
         }

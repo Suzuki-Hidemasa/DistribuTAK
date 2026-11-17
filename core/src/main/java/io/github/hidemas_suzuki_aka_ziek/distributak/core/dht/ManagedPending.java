@@ -100,6 +100,15 @@ public final class ManagedPending {
      * Calling a public method of the same area during retry throws IllegalStateException. Rechecks the remainder after any pass with ACCEPTED and stops when none is accepted.
      */
     public synchronized List<Checked> retry(ManagedVerifier verifier,Function<DhtId,ManagedDhtRecord> held,Consumer<Checked> apply) {
+        return retry(verifier,held,apply,false);
+    }
+    /**
+     * 観察用の呼出だけ、検証済みのOLDとDUPLICATEも渡す。失敗した項目は元の期限で戻す。
+     * <p>
+     * Also delivers verified OLD and DUPLICATE results for observation callers, restoring failed entries with their original deadlines.
+     */
+    public synchronized List<Checked> retry(ManagedVerifier verifier,Function<DhtId,ManagedDhtRecord> held,Consumer<Checked> apply,
+            boolean deliverNonWinners){
         checkReentry();Objects.requireNonNull(verifier);Objects.requireNonNull(held);Objects.requireNonNull(apply);
         retrying=true;
         try{
@@ -134,12 +143,13 @@ public final class ManagedPending {
                     var verdict=entry.memberId==null?verifier.judge(entry.record,current):verifier.judgeStore(entry.record,current,entry.memberId);
                     if(!pending(verdict)&&remove(entry)){
                         var checked=new Checked(entry.record,verdict);
-                        if(verdict.status()==ManagedVerdict.Status.ACCEPTED){
+                        boolean accepted=verdict.status()==ManagedVerdict.Status.ACCEPTED;
+                        if(accepted||deliverNonWinners&&(verdict.status()==ManagedVerdict.Status.OLD||verdict.status()==ManagedVerdict.Status.DUPLICATE)){
                             try{apply.accept(checked);}
                             catch(RuntimeException|Error failure){
                                 entries.add(entry);bytes+=entry.encoded.length;throw failure;
                             }
-                            progressed=true;
+                            if(accepted)progressed=true;
                         }
                         resolved.add(checked);
                     }
@@ -149,5 +159,18 @@ public final class ManagedPending {
         }finally{retrying=false;}
     }
     public synchronized int size(){checkReentry();expire();return entries.size();}
+    /**
+     * 終了時に保留の所有バッファを消す。
+     * <p>
+     * Wipes owned pending buffers on shutdown.
+     */
+    public synchronized void clear(){
+        checkReentry();for(var entry:entries){
+            io.github.hidemas_suzuki_aka_ziek.distributak.core.Crypto.wipe(entry.encoded);
+            io.github.hidemas_suzuki_aka_ziek.distributak.core.Crypto.wipe(entry.memberId);
+            io.github.hidemas_suzuki_aka_ziek.distributak.core.Crypto.wipe(entry.owner);
+        }
+        entries.clear();bytes=0;
+    }
     public synchronized int bytes(){checkReentry();expire();return bytes;}
 }

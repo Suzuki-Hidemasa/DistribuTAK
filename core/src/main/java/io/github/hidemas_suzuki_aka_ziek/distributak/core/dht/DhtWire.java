@@ -15,9 +15,14 @@ import java.util.Objects;
 
 /**
  * DHT のメッセージの線の形（核 C2。ADR 0030 答え 181）。既存の DATA の SyncEnvelope の項目 9 に載せる。
- * 外側（SyncEnvelope）の schema は 2。CoT の同期（schema 1）とは項目で分かれ、混ぜた形は断る。
+ * 外側と本文は発見記録がschema 2/1、管理記録が3/2。混ぜた形は断る。
  * 読むときは、決めた形（入れ子の深さ・項目の型・重ね書き・正規の符号化）だけを受ける。
  * 形が違うときの例外の文は固定で、番地・番号・鍵・メッセージの中身は出さない。
+ * <p>
+ * DHT wire format in DATA SyncEnvelope field 9 (core C2; ADR 0030 answer 181).
+ * Outer/inner schemas are 2/1 for discovery and 3/2 for management; mixed pairs are rejected.
+ * Parsing accepts only the specified depth, field types, uniqueness and canonical encoding.
+ * Malformed-input exceptions use fixed text without addresses, identifiers, keys or message contents.
  */
 public final class DhtWire {
     /** DATA の平文の最大。1 通に入らない形は作らない。 */
@@ -63,8 +68,15 @@ public final class DhtWire {
         private TransferKind transferKind;
         private byte[] transferId,digest,piece,received;
         private int totalBytes,index,count;
+        private boolean managed;
         private Message(){}
         public Op op(){return op;}
+        /**
+         * 管理用の外側3・内側2か。
+         * <p>
+         * Whether the outer and inner schemas are management versions 3 and 2.
+         */
+        public boolean managed(){return managed;}
         public byte[] groupId(){return groupId.clone();}
         public byte[] requestId(){return requestId.clone();}
         public DhtId target(){return target;}
@@ -89,7 +101,20 @@ public final class DhtWire {
 
     /** 先頭の 3 バイト（schema=2 と項目 9）だけで DHT の線かどうかを見分ける。形の検査は parse が行う。 */
     public static boolean isDht(byte[] wire) {
-        return wire!=null&&wire.length>=3&&wire[0]==0x08&&wire[1]==0x02&&wire[2]==0x4A;
+        return wire!=null&&wire.length>=3&&wire[0]==0x08&&(wire[1]==0x02||wire[1]==0x03)&&wire[2]==0x4A;
+    }
+
+    /**
+     * 既存のDHT本文を管理用のスキーマへ結ぶ。項目や操作は増やさない。
+     * <p>
+     * Binds an existing DHT body to management schemas without adding fields or operations.
+     */
+    public static byte[] management(byte[] wire){
+        parse(wire);
+        try{
+            var outer=SyncSchema.SyncEnvelope.parseFrom(wire);
+            return outer.toBuilder().setSchema(3).setDht(outer.getDht().toBuilder().setSchema(2)).build().toByteArray();
+        }catch(InvalidProtocolBufferException invalid){throw invalid();}
     }
 
     // ---- 読む ----
@@ -167,9 +192,12 @@ public final class DhtWire {
             preflight(in,Shape.ROOT,0);
             if(!in.isAtEnd())throw invalid();
             SyncSchema.SyncEnvelope envelope=SyncSchema.SyncEnvelope.parseFrom(wire);
-            if(envelope.getSchema()!=OUTER_SCHEMA||envelope.getBodyCase()!=SyncSchema.SyncEnvelope.BodyCase.DHT)throw invalid();
+            boolean managed=envelope.getSchema()==3;
+            if(envelope.getSchema()!=OUTER_SCHEMA&&!managed||envelope.getBodyCase()!=SyncSchema.SyncEnvelope.BodyCase.DHT)throw invalid();
             if(!Arrays.equals(wire,envelope.toByteArray()))throw invalid();
-            return check(envelope.getDht());
+            if(envelope.getDht().getSchema()!=(managed?2:INNER_SCHEMA))throw invalid();
+            var result=check(managed?envelope.getDht().toBuilder().setSchema(INNER_SCHEMA).build():envelope.getDht());
+            result.managed=managed;return result;
         } catch(InvalidProtocolBufferException malformed) {
             throw invalid();
         } catch(IOException malformed) {

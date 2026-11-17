@@ -41,7 +41,12 @@ import io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.LocalNetwork;
  * <p>
  * 使うのは {@link LanController} の作業の列（1 本のスレッド）だけ。核はスレッドを作らないので、{@link #step} を 1 秒おきに呼んで進める。
  * 送る先は今の Wi-Fi の IPv4 LAN にいる同じグループの相手だけ。HaLow など外のネットワークにはつながない（legal Q107 (1)）。
- * 預かるのは同じグループの発見の記録だけで、メモリの中にだけ置く（答え 181 (6)）。新しい暗号の方式は足さない。
+ * 同じグループの発見記録と管理記録をメモリだけに預かる（答え 181 (6)・04 §4.5）。
+ * 管理記録は共有の保存調整層がある通常接続にだけ接続する。新しい暗号の方式は足さない。
+ * <p>
+ * Destinations are peers of the same group on the current IPv4 Wi-Fi LAN, excluding HaLow and other networks (legal Q107 (1)).
+ * Discovery and management copies of the same group are held only in memory (answer 181 (6); 04 §4.5).
+ * Management records connect only on normal connections with a shared persistence coordinator. No new cryptographic scheme is added.
  * <p>
  * 外へ出す文字は、固定の文・件数だけ。番地・機器の番号・記録の鍵・uid・例外の文は出さない（答え 196 (5)(7)）。
  * 例外が出たらこの保持役だけ止める（通信全体は止めない）。止めたあとは何も送らず、何も受けない。
@@ -109,6 +114,7 @@ final class LanDht implements DhtLink {
         Supplier<byte[]> storedPeer=()->null;
         Function<DhtId,DhtWire.NodeContact> storedContact=id->null;
         Consumer<String> log=s->{};
+        ManagedDhtExchange management;
     }
 
     private static final class Handshake {
@@ -175,9 +181,12 @@ final class LanDht implements DhtLink {
         node=new DhtNode<>(self,wall,nanos,transport,(key,bytes,clock)->{
             throw new SecurityException("unused");
         },(x,y)->Long.compare(x.version(),y.version()));
-        store=new DiscoveryStore(cfg.groupId,wall,nanos,cfg.revoked);
+        store=cfg.management==null?new DiscoveryStore(cfg.groupId,wall,nanos,cfg.revoked):
+                DiscoveryStore.shared(cfg.groupId,wall,nanos,cfg.revoked,cfg.management.budget());
         DhtResponder responder=new DhtResponder(node,store,nanos);
-        dispatcher=new DhtDispatcher(cfg.groupId,node,responder,store,this,this::directory,(peer,kind,data)->{},nanos);
+        dispatcher=cfg.management==null?new DhtDispatcher(cfg.groupId,node,responder,store,this,this::directory,(peer,kind,data)->{},nanos):
+                new DhtDispatcher(cfg.groupId,node,responder,store,this,this::directory,(peer,kind,data)->{},nanos,cfg.management.resources());
+        if(cfg.management!=null)dispatcher.configureManaged(cfg.management.store());
         publisher=new DhtPublisher(node,dispatcher,store);
         dispatcher.networkChanged(wire.nextGeneration(),network);
         long now=nanos.getAsLong();
@@ -220,6 +229,22 @@ final class LanDht implements DhtLink {
         return pressNotFound;
     }
 
+    /**
+     * 管理記録を現在のDHT相手へ公開する。周期探索は後続の段階で接続する。
+     * <p>
+     * Publishes a management record to a current DHT peer; periodic discovery connects in a later stage.
+     */
+    boolean publishManaged(Contact destination,byte[] encoded,Consumer<DhtWire.StoreStatus> done){
+        return active()&&cfg.management!=null&&cfg.management.allowed()&&dispatcher.storeManaged(destination,encoded,done);
+    }
+    /**
+     * 管理記録を現在の相手から取得する。運用への鍵の適用は行わない。
+     * <p>
+     * Fetches a management record from a current peer without applying operational keys.
+     */
+    boolean findManaged(Contact destination,DhtId target,Consumer<io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.ManagedDhtRecord> done){
+        return active()&&cfg.management!=null&&cfg.management.allowed()&&dispatcher.findManagedFrom(destination,target,done);
+    }
     DhtDispatcher dispatcherForTest() {
         return dispatcher;
     }
@@ -274,6 +299,8 @@ final class LanDht implements DhtLink {
         } catch(RuntimeException|LinkageError ignored) {
             log("DHT_CLOSE_PARTIAL");
         }
+        if(cfg.management!=null)try{cfg.management.close();}
+        catch(RuntimeException|LinkageError ignored){log("DHT_CLOSE_PARTIAL");}
     }
 
     private void clearMemory() {
@@ -534,6 +561,16 @@ final class LanDht implements DhtLink {
                 volatileMine.remove(id);
             } else if(!volatileMine.containsKey(id)&&volatileMine.size()<LanGroup.MAX_PEERS) {
                 volatileMine.put(id,Boolean.TRUE);
+            }
+            if(cfg.management!=null) {
+                DhtWire.Message message;
+                try {message=DhtWire.parse(plain);}
+                catch(RuntimeException malformed) {
+                    // 壊れた1通は既存の解析側に数えさせ、DHT全体は止めない。
+                    // Let the existing parser count one malformed message without stopping all DHT traffic.
+                    return dispatcher.receive(peer,session,plain);
+                }
+                if(message.managed()&&!cfg.management.allowed())return true;
             }
             sessionSeen(id,session);
             return dispatcher.receive(peer,session,plain);
