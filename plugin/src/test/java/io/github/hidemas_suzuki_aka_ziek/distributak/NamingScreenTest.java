@@ -6,6 +6,16 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class NamingScreenTest {
+    @Test public void directionalControlReturnsToInputWithoutSaveConfirmation()throws Exception{
+        try(var p=new UnknownOnlineTest.Pair()){
+            p.a.controller.confirmManagement(reconnect(p));p.a.drain();Object input=p.a.ui.input;
+            p.a.ui.confirmation=null;long before=UnknownOnlineTest.group(p.a).saveSeq;
+            p.a.controller.setLabel(input,label()+"\u2066");p.a.drain();
+            assertNull(p.a.ui.confirmation);assertSame(input,p.a.ui.input);
+            assertEquals(before,UnknownOnlineTest.group(p.a).saveSeq);
+            assertTrue(p.a.ui.last.text.contains("文字の向きを変える文字"));
+        }
+    }
     static String label(){return UUID.randomUUID().toString().replace("-","").substring(0,12);}
     static Object reconnect(UnknownOnlineTest.Pair p)throws Exception{
         p.a.controller.namePeer(p.a.controller.ticket());p.a.drain();assertNotNull(p.a.ui.naming);

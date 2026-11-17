@@ -5,6 +5,15 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class ManualRotationScreenTest {
+    static void assertRotationNotice(String text){
+        assertTrue(text.contains("最大180秒"));assertTrue(text.contains("5秒に1回"));
+        assertTrue(text.contains("新しい鍵で接続し直します"));
+    }
+    @Test public void confirmationExplainsExistingRotationLimits()throws Exception{
+        try(var h=new LanControllerHarness(disk())){
+            ask(h);assertRotationNotice(h.ui.managementTexts.get(h.ui.managementTexts.size()-1));
+        }
+    }
     static LanControllerHarness.Disk disk()throws Exception{
         var disk=new LanControllerHarness.Disk(LanControllerHarness.freePort());disk.enableSix();
         try(var group=LanGroup.create(disk.port(),LanControllerHarness.CLOCK,new java.security.SecureRandom())){disk.save(group);}

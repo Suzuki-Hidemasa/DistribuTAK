@@ -614,6 +614,7 @@ final class LanController implements AutoCloseable {
         managementBusy=true;pollPreparation();
     });}
     void cancelManagement(){enqueue(()->{cancelPreparation();message="操作を取り消しました";publish();});}
+    private static final String ROTATION_NOTICE="新しい鍵で接続し直します。古い鍵の接続は、入れ替え後も最大180秒残ります。鍵の入れ替えは、手動操作と自動の統合を合わせて5秒に1回までです。";
     void rotateKey(Ticket ticket){submit(()->{
         requireTicket(ticket);requireReady();requireGroup();
         if(endpoint==null||managedSessions==null||!managementActive()||preparation!=null||managementPending!=null
@@ -621,7 +622,7 @@ final class LanController implements AutoCloseable {
             throw new Unavailable("今は操作できません");
         var next=new ManagementPending(ticket,generation.get(),group);managementPending=next;
         main.accept(()->{if(managementPending==next&&accepts(ticket))ui.confirmManagement(next.token,"グループの鍵を入れ替えますか",
-                "受け取れなかった相手には、新しい招待が必要になることがあります。");});
+                ROTATION_NOTICE+"受け取れなかった相手には、新しい招待が必要になることがあります。");});
     });}
     void namePeer(Ticket ticket){submit(()->{
         requireTicket(ticket);requireReady();requireGroup();
@@ -719,7 +720,7 @@ final class LanController implements AutoCloseable {
         String title=value.action==ManagementAction.REVOKE?"メンバーを取り消して鍵を入れ替えますか":
                 value.action==ManagementAction.APPROVE?"管理者の依頼を認めますか":"管理者にしますか";
         String text=value.label+(value.action==ManagementAction.REVOKE?
-                "\n必ずグループの鍵を入れ替えます。同じ身元では戻れません。相手は消去され、戻るには新しい身元と招待が必要です。":"\n対象: 1 件。保存してから管理者の権限を付けます。");
+                "\n必ずグループの鍵を入れ替えます。同じ身元では戻れません。相手は消去され、戻るには新しい身元と招待が必要です。"+ROTATION_NOTICE:"\n対象: 1 件。保存してから管理者の権限を付けます。");
         showManagement(value,title,text);
     });}
     private Map<String,byte[]> connectedUnnamed(){
@@ -752,7 +753,7 @@ final class LanController implements AutoCloseable {
         var value=managementPending;if(value==null||value.step!=ManagementStep.LABEL_INPUT||token!=value.token)return;
         if(!managementCurrent(value)){cancelPreparation();message="確認の条件が変わりました。操作を取り消しました";return;}
         try{LocalLabels.validate(label);for(var entry:value.aliases.entrySet())if(!entry.getKey().equals(identity(value.target))&&entry.getValue().equals(label))throw new IllegalArgumentException();}
-        catch(IllegalArgumentException invalid){message="呼び名を確かめてください。32文字・128バイト以内で、空欄・制御文字・重複は使えません";
+        catch(IllegalArgumentException invalid){message=LocalLabels.INVALID;
             main.accept(()->{if(managementPending==value&&token==value.token&&accepts(value.ticket))ui.inputLabel(token);});return;}
         value.label=label;value.step=ManagementStep.LABEL_SAVE;value.token=new Object();Object confirmationToken=value.token;
         main.accept(()->{if(managementPending==value&&value.token==confirmationToken&&accepts(value.ticket))
@@ -1184,7 +1185,10 @@ final class LanController implements AutoCloseable {
             cfg.log=this::log;
             if(persistence!=null)cfg.management=new ManagedDhtExchange(owner,managed,persistence,managementUnion,clock,managementClock,runtime.nanos,random,store);
             if(cfg.management!=null)cfg.management.transport(recovery);
-            if(cfg.management!=null)cfg.management.beforeAdministrators(this::saveGrantedAdministration);
+            if(cfg.management!=null){
+                cfg.management.beforeAdministrators(this::saveGrantedAdministration);
+                cfg.management.administratorRemoved(()->{clearAdministration();cancelPreparation();});
+            }
             final LanDht created;
             try{created=new LanDht(cfg);}catch(RuntimeException|LinkageError failure){if(cfg.management!=null)cfg.management.close();throw failure;}
             dht=created;

@@ -93,16 +93,28 @@ final class LanControllerHarness implements AutoCloseable {
         GroupStateStorage managedStorage(){state.fail=failSave;return managementFiles==null?groupStorage():new GroupStateStorage(envelope,state,source(state),settings,settings,v->{},managementFiles,stopMarker.marker());}
         public void prepareNetwork(LanGroup group)throws Exception{managedStorage().prepareNetwork(group);}
         Runnable afterMembership=()->{};
+        int membershipAttempts;
         public void saveMembership(LanGroup group,AdminRecordStore.Snapshot snapshot,byte[] secret)throws Exception{
+            membershipAttempts++;
             managedStorage().saveMembership(group,snapshot,secret);afterMembership.run();
         }
         Runnable beforeCandidateSave;
         java.util.function.Consumer<AdminRecordStore.Snapshot> afterCandidateSave;
         int candidateSaves;
+        Runnable afterReservation,afterRotation;
+        int reservationSaves,rotationSaves;
         public CorePersistenceCoordinator.PersistenceHooks persistenceHooks(LanGroup group){
             var delegate=managedStorage().persistenceHooks(group);
-            if(beforeCandidateSave==null&&afterCandidateSave==null)return delegate;
+            if(beforeCandidateSave==null&&afterCandidateSave==null&&afterReservation==null&&afterRotation==null)return delegate;
             return new CorePersistenceCoordinator.PersistenceHooks(){
+                public void reserveRotationVersions(long key,long revoked){
+                    delegate.reserveRotationVersions(key,revoked);reservationSaves++;
+                    if(afterReservation!=null)afterReservation.run();
+                }
+                public void saveRotation(KeyRotationCoordinator.SavedRotation rotation,byte[] key){
+                    delegate.saveRotation(rotation,key);rotationSaves++;
+                    if(afterRotation!=null)afterRotation.run();
+                }
                 public void save(AdminRecordStore.Snapshot snapshot){
                     if(beforeCandidateSave!=null)beforeCandidateSave.run();
                     delegate.save(snapshot);candidateSaves++;

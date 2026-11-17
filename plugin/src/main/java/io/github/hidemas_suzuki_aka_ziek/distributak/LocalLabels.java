@@ -29,9 +29,12 @@ final class LocalLabels {
             }else{
                 if(Character.isLowSurrogate(ch))throw invalid();point=ch;i++;
             }
-            if(Character.isISOControl(point)||point==0x2028||point==0x2029||++scalars>32)throw invalid();
+            if(Character.isISOControl(point)||point==0x2028||point==0x2029
+                    ||point>=0x202a&&point<=0x202e||point>=0x2066&&point<=0x2069
+                    ||point==0x200e||point==0x200f||point==0x061c||++scalars>32)throw invalid();
         }
         if(label.getBytes(StandardCharsets.UTF_8).length>128)throw invalid();
     }
-    private static IllegalArgumentException invalid(){return new IllegalArgumentException("呼び名を確かめてください。32文字・128バイト以内で、空欄・制御文字・重複は使えません");}
+    static final String INVALID="呼び名を確かめてください。32文字・128バイト以内にしてください。空欄、制御文字、文字の向きを変える文字、同じ呼び名は使えません";
+    private static IllegalArgumentException invalid(){return new IllegalArgumentException(INVALID);}
 }

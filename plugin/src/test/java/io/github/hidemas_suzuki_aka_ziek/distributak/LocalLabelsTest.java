@@ -7,6 +7,10 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class LocalLabelsTest {
+    @Test public void directionalControlsAreRejectedBeforeSaving()throws Exception{
+        for(int point:new int[]{0x202a,0x202b,0x202c,0x202d,0x202e,0x2066,0x2067,0x2068,0x2069,0x200e,0x200f,0x061c})
+            save(text()+new String(Character.toChars(point)),false);
+    }
     private String text(){return UUID.randomUUID().toString().replace("-","").substring(0,12);}
     private void save(String label,boolean accepted)throws Exception {
         var f=new VersionSixStorageTest();
