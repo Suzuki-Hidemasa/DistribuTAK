@@ -187,6 +187,15 @@ public final class ManagedVerifier {
             return new AnnouncementCheck(ManagedVerdict.INVALID,null);
         return new AnnouncementCheck(null,body);
     }
+    /**
+     * 外側を付け直さない告知の観察を、現在の権限と正確な本体で検査する。
+     * <p>
+     * Validates an observation without rewrapping it, using current authority and the exact body.
+     */
+    public boolean validObservation(KeyAnnouncement announcement,byte[] group){
+        try{return checkAnnouncement(announcement,group,true).verdict()==null;}
+        catch(RuntimeException invalid){return false;}
+    }
     private AdminRecords.Record recipientCertificate(ManagedDhtRecord record) {
         var cert=AdminRecords.decode(record.recipientCertificate());
         cert.verify(AdminRecords.Kind.CERTIFICATE,record.group(),trust.latest().entries());

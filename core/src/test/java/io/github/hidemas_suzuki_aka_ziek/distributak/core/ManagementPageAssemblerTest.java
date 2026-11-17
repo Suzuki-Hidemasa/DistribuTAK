@@ -28,6 +28,15 @@ class ManagementPageAssemblerTest {
     ManagementPage change(ManagementPage p,ManagementPage.Kind kind,byte[] operation,byte[] g,byte[] digest,int total,int index,int count,byte[] data,int entries){
         return new ManagementPage(kind,operation,g,digest,total,index,count,data,entries);
     }
+    @Test void rosterPruningDoesNotDiscardAnAnnouncementWaitingForItsDependency() {
+        var assembler=new ManagementPageAssembler(group,time,resources,true);
+        var page=ManagementPage.split(ManagementPage.Kind.ANNOUNCEMENT,new byte[16],group,new byte[100],0).get(0);
+        try(var completed=assembler.receive(peer,session,1,page).completed()){
+            assertNotNull(completed);assembler.retryAnnouncement(peer,session,1,page,completed.data(),time.millis());
+        }
+        assembler.pruneRosterSummaryRetries((p,s,g)->false);
+        try(var completed=assembler.receive(peer,session,1,page).completed()){assertNotNull(completed);}
+    }
     @Test void outOfOrderPagesYieldExactlyTheWholeObjectAndNeverAPartialValue() {
         var pages=pages(2050);
         assertEquals(INCOMPLETE,receive(pages.get(2)).status());assertEquals(2050,resources.reservedBytes());

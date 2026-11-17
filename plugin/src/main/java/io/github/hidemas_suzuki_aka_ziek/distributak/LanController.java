@@ -239,6 +239,7 @@ final class LanController implements AutoCloseable {
                         }
                         continue;
                     }
+                    if(dht!=null&&dht.receiveAnnouncement(packet.peer,packet.session,packet.wire,packet.receivedAt,recovery))continue;
                     if(recovery!=null&&recovery.receive(packet.peer,packet.session,packet.wire,packet.receivedAt)){
                         if(persistence!=null&&persistence.state()==CorePersistenceCoordinator.State.STORAGE_FAILED){
                             storageStopped=true;reconnect.stop();message="保存がいっぱい";stopNetwork();
@@ -593,6 +594,7 @@ final class LanController implements AutoCloseable {
             };
             cfg.log=this::log;
             if(persistence!=null)cfg.management=new ManagedDhtExchange(owner,managed,persistence,managementUnion,clock,managementClock,runtime.nanos,random,store);
+            if(cfg.management!=null)cfg.management.transport(recovery);
             final LanDht created;
             try{created=new LanDht(cfg);}catch(RuntimeException|LinkageError failure){if(cfg.management!=null)cfg.management.close();throw failure;}
             dht=created;

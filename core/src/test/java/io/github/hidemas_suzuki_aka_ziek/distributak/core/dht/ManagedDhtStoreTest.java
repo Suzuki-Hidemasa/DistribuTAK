@@ -119,4 +119,15 @@ class ManagedDhtStoreTest {
         assertNull(f.store.get(old.key()));assertNotNull(f.store.get(record.key()));
     }
 
+    @Test void retryOnlyAbsorbsExplicitUncommittedFailureAndPreservesItsDeadline(){
+        var f=new Fixture();boolean[] deferred={true};
+        var store=new ManagedDhtStore(GROUP,f.wall,f.wall,new AdminStateTrust(f.state),f.union,id->true,f.budget,f.store,record->{
+            if(deferred[0])throw new ManagedDhtStore.PersistenceDeferred();throw new IllegalStateException("Injected invariant failure");
+        });
+        var body=revocations(1,NOW,0);store.accept(null,f.announcement(body,3,8),false);f.bodies.add(body);
+        f.now+=119999;assertDoesNotThrow(store::retry);assertEquals(1,store.pendingCount());assertEquals(0,f.budget.bytes());
+        deferred[0]=false;assertThrows(IllegalStateException.class,store::retry);assertEquals(1,store.pendingCount());
+        f.now++;store.retry();assertEquals(0,store.pendingCount());assertEquals(0,f.budget.bytes());
+    }
+
 }

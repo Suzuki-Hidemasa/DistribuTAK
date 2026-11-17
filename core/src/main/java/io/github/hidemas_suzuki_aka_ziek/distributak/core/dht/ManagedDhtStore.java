@@ -16,6 +16,7 @@ public final class ManagedDhtStore implements ManagedDependencies {
     private final byte[] group;private final Clock wall;private final DhtRecordBudget budget;
     private final ManagedDependencies trusted;private final Consumer<ManagedDhtRecord> accepted;
     private final Map<DhtId,ManagedDhtRecord> records=new LinkedHashMap<>();
+    private KeyAnnouncement observed;
     private final ManagedVerifier verifier;private final ManagedPending pending;
     private final java.util.function.BooleanSupplier allowed;
     public ManagedDhtStore(byte[] group,Clock wall,Clock deadlines,TrustedAdmins admins,RevocationUnion union,
@@ -65,6 +66,12 @@ public final class ManagedDhtStore implements ManagedDependencies {
         catch(RuntimeException failure){budget.replace(nextBytes,oldBytes);throw failure;}
         return DhtWire.StoreStatus.ACCEPTED;
     }
+    /**
+     * 保存未確定の一時失敗だけを保留の再試行へ戻す。
+     * <p>
+     * Returns only a transient uncommitted persistence failure to pending retry.
+     */
+    public static final class PersistenceDeferred extends RuntimeException {}
     private static final class Full extends RuntimeException {}
     public void retry(){
         if(!allowed.getAsBoolean())return;
@@ -73,14 +80,44 @@ public final class ManagedDhtStore implements ManagedDependencies {
             if(checked.verdict().status()!=ManagedVerdict.Status.ACCEPTED&&checked.record().kind()!=DhtKeys.KEY_ANNOUNCEMENT
                     &&checked.record().kind()!=DhtKeys.LATEST_REVOCATIONS)return;
             if(apply(checked.record(),checked.verdict())==DhtWire.StoreStatus.FULL)throw new Full();
-        },true);}catch(Full full){
+        },true);}catch(Full|PersistenceDeferred deferred){
             // 元の保留枠と期限を保ち、次の既存pollで空き容量を調べる。
             // Retain the original pending slot and deadline, checking capacity at the next existing poll.
         }
     }
     public int pendingCount(){return pending.size();}
+    /**
+     * 有限保留が必要とする記録鍵を返す。未検証入力から探索を増やさない。
+     * <p>
+     * Returns record keys needed by bounded pending entries without expanding discovery from unvalidated input.
+     */
+    public Set<DhtId> dependencyKeys(){
+        if(!allowed.getAsBoolean())return Set.of();var result=new LinkedHashSet<DhtId>();
+        for(var candidate:pending.candidates()){
+            var verdict=verifier.judge(candidate,records.get(candidate.key()));
+            if(verdict.status()==ManagedVerdict.Status.NEEDS_VERSION)
+                result.add(DhtKeys.derive(group,DhtKeys.ADMIN_HISTORY,DhtKeys.adminHistorySubject(verdict.neededVersion())));
+            else if(verdict.status()==ManagedVerdict.Status.NEEDS_ANNOUNCEMENT)
+                result.add(DhtKeys.derive(group,candidate.kind()==DhtKeys.KEY_ANNOUNCEMENT?DhtKeys.LATEST_REVOCATIONS:DhtKeys.KEY_ANNOUNCEMENT,new byte[32]));
+        }
+        return Collections.unmodifiableSet(result);
+    }
+    /**
+     * 一般メンバーの告知を一件だけ共有予算へ預ける。再受信でも署名時刻を変えない。
+     * <p>
+     * Retains one ordinary-member announcement in the shared budget without changing its signing time on redelivery.
+     */
+    public boolean rememberAnnouncement(KeyAnnouncement value){
+        if(!allowed.getAsBoolean())return false;budget.purge();
+        if(wall.millis()-value.signedAt()>=86400000||!verifier.validObservation(value,group))return false;
+        if(observed!=null&&KeyAnnouncement.compare(value,observed)<0)return true;
+        if(!budget.replace(observed==null?0:observed.encode().length,value.encode().length))return false;
+        observed=value;return true;
+    }
     private void purge(){
-        long now=wall.millis();var it=records.values().iterator();
+        long now=wall.millis();
+        if(observed!=null&&(now-observed.signedAt()>=86400000||!verifier.validObservation(observed,group))){budget.replace(observed.encode().length,0);observed=null;}
+        var it=records.values().iterator();
         while(it.hasNext()){
             var value=it.next();
             if(now<0||now>=value.expiresAt()||verifier.judge(value,null).status()==ManagedVerdict.Status.INVALID){budget.replace(value.encode().length,0);it.remove();}
@@ -90,8 +127,10 @@ public final class ManagedDhtStore implements ManagedDependencies {
         if(record==null)return null;var status=verifier.judge(record,null).status();
         return status==ManagedVerdict.Status.ACCEPTED||status==ManagedVerdict.Status.DUPLICATE||status==ManagedVerdict.Status.OLD?record:null;}
     public int size(){budget.purge();return records.size();}
-    public void clear(){for(var value:records.values())budget.replace(value.encode().length,0);records.clear();pending.clear();}
+    public void clear(){for(var value:records.values())budget.replace(value.encode().length,0);records.clear();pending.clear();if(observed!=null){budget.replace(observed.encode().length,0);observed=null;}}
     @Override public KeyAnnouncement announcement(byte[] digest){
+        if(observed!=null&&wall.millis()-observed.signedAt()<86400000&&verifier.validObservation(observed,group)
+                &&Crypto.equal(Crypto.blake2s(observed.signedBytes()),digest))return observed;
         for(var value:records.values())if(value.kind()==DhtKeys.KEY_ANNOUNCEMENT&&Crypto.equal(Crypto.blake2s(value.announcement().signedBytes()),digest))return value.announcement();
         return trusted.announcement(digest);
     }

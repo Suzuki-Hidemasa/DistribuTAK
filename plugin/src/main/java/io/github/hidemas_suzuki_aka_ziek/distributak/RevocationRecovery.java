@@ -26,6 +26,12 @@ final class RevocationRecovery implements AutoCloseable {
     private final Transport transport;
     private final ManagementSendBudget budget;
     private final ManagementPageSender sender;
+    @FunctionalInterface interface Delivered {void completed(byte[] peer,byte[] session,long generation,byte[] target);}
+    private Runnable beforeSending=()->{};
+    void beforeSending(Runnable action){beforeSending=Objects.requireNonNull(action);}
+    private void sendPages(){beforeSending.run();sender.poll();}
+    private Delivered delivered=(p,s,g,t)->{};
+    void onRevocationsDelivered(Delivered listener){delivered=Objects.requireNonNull(listener);}
     private final Set<String> attempted=new HashSet<>();
     private byte[] peer,session;
     private RevocationsRecoveryRequest request;
@@ -43,9 +49,10 @@ final class RevocationRecovery implements AutoCloseable {
             if(!coordinator.permits(CorePersistenceCoordinator.Operation.REVOCATION_PAGE))return false;
             return transport.send(p,s,w);
         });
+        sender.onCompletion((p,s,g,k,t)->{if(k==ManagementPage.Kind.REVOCATION)delivered.completed(p,s,g,t);});
     }
     void poll(List<byte[]> candidates){
-        coordinator.poll();sender.discardUnverifiedSessions(sessions);
+        coordinator.poll();sender.discardUnverifiedSessions(sessions);sender.rotating(sessions.hasRotatingSessions());
         if(coordinator.state()==CorePersistenceCoordinator.State.RECOVERING_REVOCATIONS){
             if(!coordinator.permits(CorePersistenceCoordinator.Operation.RECOVERY_REQUEST)){abandon();attempted.clear();return;}
             if(peer!=null&&clock.millis()-progress>=ManagementPageAssembler.PROGRESS_MILLIS)abandon();
@@ -75,7 +82,7 @@ final class RevocationRecovery implements AutoCloseable {
                 }
             }
         }
-        if(coordinator.permits(CorePersistenceCoordinator.Operation.REVOCATION_PAGE))sender.poll();
+        if(coordinator.permits(CorePersistenceCoordinator.Operation.REVOCATION_PAGE))sendPages();
     }
     boolean receive(byte[] source,byte[] sourceSession,byte[] wire){
         return receive(source,sourceSession,wire,clock.millis());
@@ -97,7 +104,7 @@ final class RevocationRecovery implements AutoCloseable {
                         incoming.operationId(),body.encode(),body.entries().size(),false);
                 if(offered!=ManagementPageSender.Offer.ACCEPTED)transport.rejected(offered);
             }
-            sender.poll();return true;
+            sendPages();return true;
         }
         if(field==ManagementEnvelopeFields.PAGE_ACK){
             final ManagementPageAck ack;
@@ -139,6 +146,23 @@ final class RevocationRecovery implements AutoCloseable {
                 operations.next(),body.encode(),body.entries().size(),false);
     }
     byte[] nextManagementOperation(){return operations.next();}
+    void cancelSavedDelivery(byte[] revocations,byte[] announcement){
+        if(revocations!=null)sender.discardTarget(ManagementPage.Kind.REVOCATION,revocations);
+        if(announcement!=null)sender.discardTarget(ManagementPage.Kind.ANNOUNCEMENT,announcement);
+    }
+    ManagementPageSender.Offer offerAnnouncement(byte[] peer,KeyAnnouncement announcement){
+        return offerAnnouncement(peer,announcement,clock.millis());
+    }
+    ManagementPageSender.Offer offerAnnouncement(byte[] peer,KeyAnnouncement announcement,long offeredAt){
+        if(!coordinator.permits(CorePersistenceCoordinator.Operation.KEY_ANNOUNCEMENT))return ManagementPageSender.Offer.BUSY;
+        var verified=sessions.verifiedSession(peer);if(verified==null||coordinator.isRevoked(peer))return ManagementPageSender.Offer.INVALID;
+        sender.discardOtherSessions(peer,verified.sessionId(),verified.generation());
+        return sender.offer(peer,verified.sessionId(),verified.generation(),ManagementPage.Kind.ANNOUNCEMENT,
+                operations.next(),announcement.encode(),0,false,offeredAt);
+    }
+    boolean announcementAck(byte[] peer,byte[] session,ManagementPageAck ack){
+        return coordinator.permits(CorePersistenceCoordinator.Operation.KEY_ANNOUNCEMENT)&&sender.sendAck(peer,session,ack);
+    }
     ManagementPageSender.Offer offerRoster(byte[] peer,ManagementPage.Kind kind,byte[] operation,byte[] data,int count){
         if(!coordinator.permits(CorePersistenceCoordinator.Operation.ROSTER))return ManagementPageSender.Offer.BUSY;
         var verified=sessions.verifiedSession(peer);if(verified==null)return ManagementPageSender.Offer.INVALID;
