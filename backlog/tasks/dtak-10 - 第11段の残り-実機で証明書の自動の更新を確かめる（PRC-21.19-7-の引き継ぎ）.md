@@ -4,6 +4,7 @@ title: '第11段の残り: 実機で証明書の自動の更新を確かめる�
 status: To Do
 assignee: []
 created_date: '2026-11-16 00:24'
+updated_date: '2026-11-17 12:54'
 labels:
   - stage-11
   - device
@@ -27,3 +28,9 @@ PRC-163 のタスク PRC-21.19（第11段）の残りの受入の条件 #7。第
 - [ ] #2 管理者の証明書が切れた場合の扱い（04 の 4.4 の末尾の未決）を二者のレビューで決め、PRC-163:docs/decisions/0030-device-as-lan-router.md と docs/04-detailed-design.md に書いてある
 - [ ] #3 logcat に CoT の中身・鍵・招待・TOTP・PSK が出ていない（起動し直す前から logcat をファイルに流して取る）
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+【AC#2 の決定（2026-11-17）】二者のレビュー（Astra・Fable 5.2。out/reviews/dtak10-ac2/conclusion.md）の合意を受け、利用者が案 A を採ると決めた。文と試験は DTAK-25 で行う。管理者もメンバーも証明書が切れた場合の復旧は DTAK-26 に分けた（利用者が別タスクにすると決めた）。AC#2 は、DTAK-25 が終わり、ADR 0030 への追記（PRC-163 側。利用者が書く）が済んだら印を付ける。
+<!-- SECTION:NOTES:END -->

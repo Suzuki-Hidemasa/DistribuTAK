@@ -4,6 +4,7 @@ title: 読み込み後に旧形式（版 5）の停止印が壊れたときの�
 status: To Do
 assignee: []
 created_date: '2026-11-17 10:21'
+updated_date: '2026-11-17 10:30'
 labels:
   - security
 dependencies: []
@@ -26,3 +27,9 @@ ordinal: 20000
 - [ ] #2 決めた動きを確かめる試験が、機能の欠如で落ちる形で先にある
 - [ ] #3 核・プラグインの全試験が 0 失敗・0 スキップ、lint エラー 0、NewApi 0
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-17 利用者の決定: (1) 読み込み後に旧形式（版 5）の停止印が壊れたら、起動前の検査と同じ INVALID の固定文を必ず出す（storageBlocked と invalidStopMarker を立てる）。(2) すでに開いている通信の口は閉じる。実装前に docs/04 §4.5 へ書き、試験を先に書く（機能の欠如で落ちる形）。実装の依頼と push・PR は別の許可を待つ。
+<!-- SECTION:NOTES:END -->
