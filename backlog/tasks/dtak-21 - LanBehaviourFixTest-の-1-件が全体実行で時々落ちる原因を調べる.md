@@ -1,11 +1,11 @@
 ---
 id: DTAK-21
 title: LanBehaviourFixTest の 1 件が全体実行で時々落ちる原因を調べる
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-17 10:33'
-updated_date: '2026-11-18 08:28'
+updated_date: '2026-11-18 08:32'
 labels:
   - testing
 dependencies: []
@@ -42,3 +42,9 @@ LanBehaviourFixTest.peerWithoutSessionDoesNotAdvanceReviewAndRenewsAfterConnecti
 <!-- SECTION:NOTES:BEGIN -->
 原因: 修正前に 300 回で 3 件失敗（握手が確立しない 2 件、確立したが更新が届かない 1 件）。握手の再送と、5 秒の仮の時計で制御する更新の再送は、仮の時計を進めないと起きない。試験の仮の時計を一度しか進めないため、握手や更新が最初の試行で通らないとき、再送の機会が来ないまま 5 秒の上限に達していた。製品の欠陥ではなく試験の時間依存。修正: 待つ間に仮の時計を 100 回の確認ごとに 5 秒進める補助 untilAdvancing を足し、握手の待ちと更新の待ちに使う。検証: 修正後 300 回で失敗 0。全試験: 核 1,675・プラグイン 799、失敗・スキップ 0、lint 0、NewApi 0。なお全体の 1 回目で別の NamingScreenTest・AdministrationButtonsTest が落ちた（再実行で通る）。DTAK-28 に分けた。
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+LanBehaviourFixTest に、待つ間に仮の時計を進める補助 untilAdvancing を足した（試験だけ）。原因は握手と更新の時間駆動の再送の機会が来ないこと。修正前 3/300 失敗、修正後 0/300。核 1,675・プラグイン 799 が失敗 0、lint 0、NewApi 0。PR #30。
+<!-- SECTION:FINAL_SUMMARY:END -->
