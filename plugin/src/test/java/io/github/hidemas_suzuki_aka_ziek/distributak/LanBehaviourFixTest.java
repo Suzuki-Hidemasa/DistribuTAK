@@ -21,6 +21,16 @@ public class LanBehaviourFixTest {
         }
         return pair;
     }
+    // 条件が成り立つまで待つ。待つ間、試験の仮の時計を一定の間隔で進めて、時間で進む再送の機会を作る。
+    // Waits for the condition. While waiting it advances the test clock at a fixed interval so that time-driven retries get their chance.
+    static void untilAdvancing(String branch,LanControllerHarness.Check check,LanControllerHarness admin,LanControllerHarness member)throws Exception{
+        int[] calls={0};
+        LanControllerHarness.until(branch,()->{
+            if(check.ok())return true;
+            if(++calls[0]%100==0){admin.offset.addAndGet(5_000_000_000L);member.offset.addAndGet(5_000_000_000L);}
+            return false;
+        },admin,member);
+    }
     static LanControllerHarness stoppedAdmin(LanControllerHarness.Disk disk)throws Exception{
         var admin=new LanControllerHarness(disk);admin.controller.disconnect();admin.drain();return admin;
     }
@@ -154,9 +164,9 @@ public class LanBehaviourFixTest {
         try(var admin=new LanControllerHarness(pair[0])){
             admin.tick();assertEquals(false,LanControllerHarness.field(admin.controller,"renewalAttempted"));
             try(var member=new LanControllerHarness(pair[1])){
-                LanControllerHarness.until(()->admin.endpoint().isEstablished(LanBehaviourWiringTest.group(member).id()),admin,member);
+                untilAdvancing("session established",()->admin.endpoint().isEstablished(LanBehaviourWiringTest.group(member).id()),admin,member);
                 admin.offset.addAndGet(5_000_000_000L);member.offset.addAndGet(5_000_000_000L);
-                LanControllerHarness.until(()->LanBehaviourWiringTest.group(member).renewalCount==1,admin,member);
+                untilAdvancing("renewal delivered",()->LanBehaviourWiringTest.group(member).renewalCount==1,admin,member);
                 assertEquals(true,LanControllerHarness.field(admin.controller,"renewalAttempted"));
             }
         }
