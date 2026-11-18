@@ -51,6 +51,8 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
     TransferResources resources(){return coordinator.transferResources();}
     KeyRotationCoordinator rotation(){return rotation;}
     private java.util.function.Predicate<AdminRecords.Record> beforeAdministrators=value->false;
+    private Runnable administratorRemoved=()->{};
+    void administratorRemoved(Runnable value){administratorRemoved=Objects.requireNonNull(value);}
     void beforeAdministrators(java.util.function.Predicate<AdminRecords.Record> value){beforeAdministrators=value;}
     KeyRotationCoordinator.Result manual(List<byte[]> revoked){
         if(!allowed()||rotation==null)throw new IllegalStateException("今は操作できません");
@@ -76,7 +78,7 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
             var body=store.revocations(a.revocationVersion(),a.revocationDigest());
             if(body==null){lookup(DhtKeys.derive(group.groupId,DhtKeys.LATEST_REVOCATIONS,new byte[32]));return false;}
             group.state.verifyAnnouncement(a,body);
-            if(administration==null)return admitMemberAnnouncement(a,body);
+            if(!group.isAdministrator())return admitMemberAnnouncement(a,body);
             var outer=ManagedDhtRecord.issue(group.groupId,group.administratorSecret,a,0,admins.version(),Crypto.blake2s(admins.signedBytes()),a.signedAt());
             var status=store.accept(null,outer,false);
             return status==DhtWire.StoreStatus.ACCEPTED||status==DhtWire.StoreStatus.DUPLICATE||status==DhtWire.StoreStatus.OLD;
@@ -153,7 +155,7 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
     }
     private final Map<DhtId,PageRecipient> pageRecipients=new HashMap<>();
     private KeyRotationCoordinator.Publication currentPublication(){
-        if(closed||rotation==null)return null;var value=rotation.publication();if(value==null)return null;
+        if(closed||rotation==null||!group.isAdministrator())return null;var value=rotation.publication();if(value==null)return null;
         try{group.state.verifyAnnouncement(value.announcement(),value.revocations());return value;}
         catch(SecurityException|IllegalStateException invalid){return null;}
     }
@@ -167,7 +169,7 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
         }
     }
     private void publishSaved(LanDht dht,List<Contact> peers,long now){
-        if(rotation==null)return;
+        if(rotation==null||!group.isAdministrator())return;
         boolean authorized=group.state.administrators().hasEntry(Crypto.ed25519Public(group.administratorSecret));
         if(authorized&&rotation.pending())rotation.poll(recipients(),storage.persistenceHooks(group));
         var publication=currentPublication();
@@ -274,11 +276,19 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
     private void accepted(ManagedDhtRecord value){
         coordinator.execute(CorePersistenceCoordinator.Operation.DHT_WRITE,()->{});
         if(value.kind()==DhtKeys.LATEST_ADMINS||value.kind()==DhtKeys.ADMIN_HISTORY){
-            var current=group.state.administrators();
-            if(value.inner().version()>current.version()||value.inner().version()==current.version()&&AdminRecords.compare(value.inner(),current)>0){
-                if(!beforeAdministrators.test(value.inner())&&!coordinator.receiveAdministrators(value.inner(),storage.persistenceHooks(group))){
-                    if(coordinator.state()==CorePersistenceCoordinator.State.RUNNING)throw new ManagedDhtStore.PersistenceDeferred();
-                    throw new IllegalStateException("Administrator persistence stopped");
+            boolean heldAdministrator=group.isAdministrator();
+            try{
+                var current=group.state.administrators();
+                if(value.inner().version()>current.version()||value.inner().version()==current.version()&&AdminRecords.compare(value.inner(),current)>0){
+                    if(!beforeAdministrators.test(value.inner())&&!coordinator.receiveAdministrators(value.inner(),storage.persistenceHooks(group))){
+                        if(coordinator.state()==CorePersistenceCoordinator.State.RUNNING)throw new ManagedDhtStore.PersistenceDeferred();
+                        throw new IllegalStateException("Administrator persistence stopped");
+                    }
+                }
+            }finally{
+                if(heldAdministrator&&!group.isAdministrator()){
+                    if(administration!=null)administration.close();
+                    administratorRemoved.run();
                 }
             }
         }else if(value.kind()==DhtKeys.LATEST_REVOCATIONS){
@@ -290,7 +300,7 @@ final class ManagedDhtExchange implements AutoCloseable,ManagedDependencies {
             if(body==null)throw new SecurityException("Missing announcement body");
             coordinator.execute(CorePersistenceCoordinator.Operation.KEY_ANNOUNCEMENT,()->{
                 group.state.verifyAnnouncement(announcement,body);
-                if(rotation!=null)rotation.observe(announcement,body);
+                if(rotation!=null&&group.isAdministrator())rotation.observe(announcement,body);
             });
             if(announcement.keyVersion()>group.keyVersion&&group.state.coversRevocations(body))lookup(DhtKeys.derive(group.groupId,DhtKeys.WRAPPED_KEY,group.id()));
         }else if(value.kind()==DhtKeys.WRAPPED_KEY&&Crypto.equal(value.subject(),group.id())){

@@ -48,6 +48,7 @@ public class AdministrationButtonsTest {
         try(var p=new UnknownOnlineTest.Pair()){
             prepare(p);var group=UnknownOnlineTest.group(p.a);long version=group.keyVersion;byte[] target=UnknownOnlineTest.group(p.m).id();
             Object token=select(p,LanController.ManagementAction.REVOKE);
+            ManualRotationScreenTest.assertRotationNotice(p.a.ui.managementTexts.get(p.a.ui.managementTexts.size()-1));
             assertFalse(group.state.revocations().hasEntry(target));p.a.controller.confirmManagement(token);p.a.drain();
             assertTrue(group.state.revocations().hasEntry(target));assertTrue(group.keyVersion>version);
             assertTrue(group.management.aliases.isEmpty());
@@ -112,7 +113,10 @@ public class AdministrationButtonsTest {
                     candidate.administrators(),0,basis.version(),Crypto.blake2s(basis.signedBytes()),p.wall.millis(),null);
             var dht=(LanDht)LanControllerHarness.field(p.m.controller,"dht");var cfg=(LanDht.Config)LanControllerHarness.field(dht,"cfg");
             long sequence=member.saveSeq;byte[] saved=p.m.disk.state.value.clone(),list=member.state.administrators().encode();
-            p.m.disk.failSave=true;cfg.management.store().accept(null,record,false);
+            int attempts=p.m.disk.membershipAttempts;
+            p.m.disk.failSave=true;
+            assertEquals(io.github.hidemas_suzuki_aka_ziek.distributak.core.dht.DhtWire.StoreStatus.INVALID,cfg.management.store().accept(null,record,false));
+            assertEquals(attempts+1,p.m.disk.membershipAttempts);
             assertNotNull(p.m.endpoint());assertTrue(dht.active());assertFalse((boolean)LanControllerHarness.field(p.m.controller,"committedNotApplied"));
             assertEquals(sequence,member.saveSeq);assertArrayEquals(saved,p.m.disk.state.value);assertArrayEquals(list,member.state.administrators().encode());
             assertNull(LanControllerHarness.field(p.m.controller,"outboundAdministration"));assertFalse(member.isAdministrator());

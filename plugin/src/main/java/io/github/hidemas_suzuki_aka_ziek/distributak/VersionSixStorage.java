@@ -29,8 +29,10 @@ final class VersionSixStorage {
     }
     static final class Candidate implements AutoCloseable {
         final long sequence;final ManagementState management;final byte[] state,wire,digest,key;final long keyVersion;
-        Candidate(long sequence,ManagementState management,byte[] state,byte[] wire,byte[] digest,byte[] key,long keyVersion){
+        final boolean removesAdministrator;
+        Candidate(long sequence,ManagementState management,byte[] state,byte[] wire,byte[] digest,byte[] key,long keyVersion,boolean removesAdministrator){
             this.sequence=sequence;this.management=management;this.state=state;this.wire=wire;this.digest=digest;this.key=key==null?null:key.clone();this.keyVersion=keyVersion;
+            this.removesAdministrator=removesAdministrator;
         }
         public void close(){Crypto.wipe(state);Crypto.wipe(wire);Crypto.wipe(digest);Crypto.wipe(key);}
     }
@@ -46,6 +48,8 @@ final class VersionSixStorage {
                               byte[] key,long keyVersion,Map<String,long[]> reservations,List<byte[]> outgoing,MemberDirectory directory,Map<String,String> labels,byte[] secret)throws Exception {
         long seq=Math.addExact(group.saveSeq,1),generation=files.nextGeneration();
         var management=ManagementState.candidate(group,generation,snapshot,group.clock);
+        boolean removesAdministrator=removesAdministrator(group,management);
+        if(removesAdministrator)secret=new byte[0];
         if(directory!=null){management=management.directory(directory,labels);
             for(byte[] encoded:management.roster)group.state.verifyStoredCertificateEvidence(AdminRecords.decode(encoded));}
         if(reservations!=null||outgoing!=null)management=new ManagementState(generation,snapshot,management.union,management.roster,management.legacyPermissions,
@@ -75,7 +79,7 @@ final class VersionSixStorage {
             if(!selfRevoked)try(var restored=LanGroup.decode(state,group.clock,true,(g,d)->checked)){
                 if(!ManagementState.sameSnapshot(restored.state.snapshot(),snapshot))throw new IOException("保存候補の管理状態が違います");
             }
-            return new Candidate(seq,management,state,wire,digest,key,keyVersion);
+            return new Candidate(seq,management,state,wire,digest,key,keyVersion,removesAdministrator);
         }catch(Exception e){Crypto.wipe(wire);Crypto.wipe(state);throw e;}finally{Crypto.wipe(plain);}
     }
     private void checkSpace(Candidate candidate)throws IOException{
@@ -127,7 +131,16 @@ final class VersionSixStorage {
         }catch(Exception e){candidate.close();throw e;}
     }
     synchronized void stagedCommitted(LanGroup group,Candidate candidate){install(group,candidate);}
+    private static boolean removesAdministrator(LanGroup group,ManagementState candidate){
+        if(!group.isAdministrator())return false;
+        var state=LanGroup.restore(group.groupId,group.urlAdmin,candidate.snapshot,group.clock);
+        try{return !state.administrators().hasEntry(Crypto.ed25519Public(group.administratorSecret));}
+        finally{state.clear();}
+    }
     private void install(LanGroup group,Candidate candidate){
+        if(candidate.removesAdministrator){
+            Crypto.wipe(group.administratorSecret);group.administratorSecret=new byte[0];
+        }
         group.saveSeq=candidate.sequence;group.management=candidate.management;group.managementGeneration=candidate.management.generation;
         Crypto.wipe(group.managementDigest);group.managementDigest=candidate.digest.clone();
         if(candidate.key!=null){Crypto.wipe(group.groupKey);group.groupKey=candidate.key.clone();group.keyVersion=candidate.keyVersion;}

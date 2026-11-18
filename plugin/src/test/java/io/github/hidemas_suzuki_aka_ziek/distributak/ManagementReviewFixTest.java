@@ -30,6 +30,33 @@ public class ManagementReviewFixTest {
                 directory.saved(renewed(member,group.administratorSecret));
                 p.a.disk.saveDirectory(group,directory,group.management.aliases);sequence=group.saveSeq;
             }
+            if(kind==3){
+                var next=AdminRecords.list(AdminRecords.Kind.REVOCATIONS,group.groupId,group.state.revocations().version()+1,
+                        p.wall.millis(),group.state.revocations().entries(),group.administratorSecret);
+                assertTrue(group.state.acceptRevocations(next));
+            }
+            if(kind==4){
+                var labels=new TreeMap<>(group.management.aliases);String key=labels.keySet().iterator().next();
+                String replacement=NamingScreenTest.label();assertFalse(replacement.equals(labels.get(key)));labels.put(key,replacement);
+                var directory=new MemberDirectory(group.state);directory.restoreSnapshot(group.management.roster);
+                p.a.disk.saveDirectory(group,directory,labels);sequence=group.saveSeq;
+            }
+            if(kind==5){
+                var sessions=(SessionManager)LanControllerHarness.field(p.a.controller,"managedSessions");
+                byte[] peer=UnknownOnlineTest.group(p.m).id(),before=sessions.sessionId(peer);
+                synchronized(LanControllerHarness.field(p.a.endpoint(),"lock")){synchronized(sessions){
+                    for(Object entry:((Map<?,?>)LanControllerHarness.field(sessions,"peers")).values()){
+                        var field=entry.getClass().getDeclaredField("active");field.setAccessible(true);
+                        Object active=field.get(entry);if(active!=null)((AutoCloseable)active).close();field.set(entry,null);
+                    }
+                }}
+                assertNotNull(before);assertNull(sessions.sessionId(peer));
+            }
+            if(kind==6){
+                var previous=group.state.administrators();
+                var next=AdminRecords.administrators(group.groupId,previous.version()+1,p.wall.millis(),previous.bindings(),group.administratorSecret);
+                assertTrue(group.state.acceptAdministrators(next,v->fail()));list=next.encode();
+            }
             p.a.controller.confirmManagement(token);p.a.drain();
             assertEquals(sequence,group.saveSeq);assertArrayEquals(list,group.state.administrators().encode());
             assertNull(LanControllerHarness.field(p.a.controller,"preparation"));assertNotNull(p.a.endpoint());
@@ -39,6 +66,34 @@ public class ManagementReviewFixTest {
     @Test public void individualRemovalRejectsChangedLocalCertificate()throws Exception{removalChange(0);}
     @Test public void individualRemovalRejectsChangedKeyVersion()throws Exception{removalChange(1);}
     @Test public void individualRemovalRejectsChangedTargetCertificate()throws Exception{removalChange(2);}
+    @Test public void individualRemovalRejectsChangedRevocations()throws Exception{removalChange(3);}
+    @Test public void individualRemovalRejectsChangedLabels()throws Exception{removalChange(4);}
+    @Test public void individualRemovalRejectsChangedSession()throws Exception{removalChange(5);}
+    @Test public void individualRemovalRejectsChangedAdministrators()throws Exception{removalChange(6);}
+    private void committedRotation(boolean revoke)throws Exception{
+        try(var p=new UnknownOnlineTest.Pair()){
+            AdministrationButtonsTest.prepare(p);var group=UnknownOnlineTest.group(p.a);
+            Object token=revoke?AdministrationButtonsTest.select(p,LanController.ManagementAction.REVOKE):ManualRotationScreenTest.ask(p.a);
+            long before=group.saveSeq,key=group.keyVersion;
+            var sessions=(SessionManager)LanControllerHarness.field(p.a.controller,"managedSessions");
+            p.a.disk.afterRotation=sessions::close;
+            p.a.controller.confirmManagement(token);p.a.drain();
+            assertEquals(1,p.a.disk.reservationSaves);assertEquals(1,p.a.disk.rotationSaves);assertTrue(group.saveSeq>=before+2);
+            assertTrue((boolean)LanControllerHarness.field(p.a.controller,"committedNotApplied"));assertNull(p.a.endpoint());
+            try(var saved=p.a.disk.load(p.wall)){assertEquals(key+1,saved.keyVersion);}
+        }
+    }
+    @Test public void committedRotationPublicationFailureStopsCommunication()throws Exception{committedRotation(false);}
+    @Test public void committedRevocationPublicationFailureStopsCommunication()throws Exception{committedRotation(true);}
+    @Test public void reservationOnlyFailureNeverClaimsRotationWasSaved()throws Exception{
+        try(var h=new LanControllerHarness(ManualRotationScreenTest.disk())){
+            Object token=ManualRotationScreenTest.ask(h);var group=UnknownOnlineTest.group(h);long key=group.keyVersion,seq=group.saveSeq;
+            h.disk.afterReservation=()->{throw new IllegalStateException("予約後に中断しました");};
+            h.controller.confirmManagement(token);h.drain();
+            assertEquals(1,h.disk.reservationSaves);assertEquals(0,h.disk.rotationSaves);assertTrue(group.saveSeq>seq);
+            try(var saved=h.disk.load(LanControllerHarness.CLOCK)){assertEquals(key,saved.keyVersion);}
+        }
+    }
     static void fault(LanControllerHarness h)throws Exception{
         var dht=(LanDht)LanControllerHarness.field(h.controller,"dht");
         var method=LanDht.class.getDeclaredMethod("fault");method.setAccessible(true);method.invoke(dht);assertFalse(dht.active());
