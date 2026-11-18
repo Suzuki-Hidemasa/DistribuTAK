@@ -1,11 +1,11 @@
 ---
 id: DTAK-24
 title: InitialManagementTest の待ち条件に管理 DHT の準備完了を足す
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-17 12:40'
-updated_date: '2026-11-18 08:28'
+updated_date: '2026-11-18 08:32'
 labels:
   - testing
 dependencies: []
@@ -42,3 +42,9 @@ InitialManagementTest.initialJoinManagementDhtDeliveryPersistsAndFirstUpdatesRos
 <!-- SECTION:NOTES:BEGIN -->
 原因: 試験が端点の確立と名簿だけを待ち、DHT 側の探り（PING→PONG で YES、かつ今のセッション）の完了を待たずに publishManaged を呼んでいた。80 回中 4 回、状態が PROBING か UNKNOWN（セッションなし）で false になった。修正: dhtReady（YES かつセッションあり）を until で待ち、false の分岐には状態・セッション有無・探りの送信数・確立の診断を出す（識別子は出さない）。検証: 修正後 300 回で失敗 0。DTAK-21 との関係: どちらも「試験が準備や時間駆動の再送の機会を作らずに待つ」型だが仕組みは別（DTAK-24 は DHT の探りの完了、DTAK-21 は握手の再送と 5 秒の仮の時計で動く更新の再送）。同じ修正では直らないので別のまま。全試験: 核 1,675・プラグイン 799、失敗・スキップ 0、lint 0、NewApi 0。
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+InitialManagementTest に DHT の準備完了（YES とセッション）を待つ条件と、false の分岐の診断を足した（試験だけ）。修正前 80 回中 4 回失敗、修正後 0/300。DTAK-21 とは仕組みが別。核 1,675・プラグイン 799 が失敗 0、lint 0、NewApi 0。PR #30。
+<!-- SECTION:FINAL_SUMMARY:END -->
