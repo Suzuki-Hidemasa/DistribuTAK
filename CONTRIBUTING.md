@@ -19,6 +19,7 @@ PR の base は `main` にします。
 - 核の試験、プラグインの試験、lint、`lint-core.sh` が通ること（手順は `README.md`）
 - 試験を飛ばしたり、件数を減らしたりしていないこと
 - `git diff --check` が通ること
+- GitHub Actions の CI が通ること。CI はプラグインの確認を走らせないので、プラグインの試験と lint は手元の結果を PR に書く（`README.md` の「GitHub Actions の CI」）
 
 ## コミットと文書
 

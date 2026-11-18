@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# DistribuTAK の CI（DTAK-27）。
+# CI for DistribuTAK (DTAK-27).
+#
+# GitHub 上で走らせるのは、ATAK の SDK を使わない確認だけにする。
+# Only checks that do not need the ATAK SDK run on GitHub.
+# ATAK の SDK はリポジトリにもアップロードにも入れられないため、
+# The ATAK SDK must not be committed or uploaded,
+# プラグインのビルド・試験・lint は手元で走らせる（README.md の「ビルドと試験」）。
+# so the plugin build, tests and lint run locally (README.md, "ビルドと試験").
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# 権限は読み取りだけ。秘密は使わない。
+# Read-only permission. No secrets are used.
+permissions:
+  contents: read
+
+# 同じ ref の古い実行は取り消す。
+# Cancel older runs of the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 核の試験（python3 が公開ベクトルを固定のハッシュで取得する）。
+  # Core tests (the vectors are fetched by python3 and checked against pinned hashes).
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 核の試験 / Core tests
+        run: core/build.sh clean test
+      - name: 試験レポート / Test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-report
+          path: out/distributak/build/reports/tests
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # 核を minSdk 23 の Android API で解析する（NewApi が 0 件）。ATAK の SDK は使わない。
+  # Analyse the core against Android API minSdk 23 (NewApi must be 0). No ATAK SDK is used.
+  core-api-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Android SDK platform 36 を用意する / Ensure Android SDK platform 36
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          if [[ ! -f "$ANDROID_HOME/platforms/android-36/android.jar" ]]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36"
+          fi
+      - name: 核の Android API lint / Core Android API lint
+        run: plugin/lint-core.sh
+
+  # 書式と、入れてはいけないファイルの確認。
+  # Whitespace check and forbidden-file check.
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: git diff --check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$PR_BASE...$PR_HEAD"
+          else
+            git diff --check "$PUSH_BEFORE" "$PUSH_AFTER" || git diff --check HEAD~1 HEAD
+          fi
+      - name: 入れてはいけないファイル / Forbidden files
+        run: |
+          # apk・署名の鍵・キーストア・local.properties は git に入れない（CLAUDE.md）。
+          # apk, signing keys, keystores and local.properties must never be tracked (CLAUDE.md).
+          found="$(git ls-files | grep -E '\.(apk|aab|jks|keystore|p12)$|(^|/)local\.properties$' || true)"
+          if [[ -n "$found" ]]; then
+            echo '入れてはいけないファイルが git にあります / Forbidden files are tracked:' >&2
+            echo "$found" >&2
+            exit 1
+          fi
