@@ -21,6 +21,19 @@ public class InitialManagementTest {
         LanControllerHarness.until(()->member.endpoint().isEstablished(group(admin).id())
                 &&admin.endpoint().isEstablished(group(member).id()),admin,member);
     }
+    // DHT 側の準備（YES と今のセッション）が整っているか。 / Whether the DHT-side readiness (YES and a current session) holds.
+    private static boolean dhtReady(LanControllerHarness admin,LanControllerHarness member)throws Exception {
+        var dht=(LanDht)LanControllerHarness.field(admin.controller,"dht");var id=new DhtId(group(member).id());
+        var peers=dht.dispatcherForTest().peers();
+        return peers.isYes(id)&&peers.sessionOf(id)!=null;
+    }
+    // 公開が false だった理由の手がかり。識別子は出さない。 / Clues for why the publish returned false; no identifiers are shown.
+    private static String dhtDiagnostics(LanControllerHarness admin,LanControllerHarness member)throws Exception {
+        var dht=(LanDht)LanControllerHarness.field(admin.controller,"dht");var id=new DhtId(group(member).id());
+        var peers=dht.dispatcherForTest().peers();
+        return "publishManaged=false active="+dht.active()+" state="+peers.state(id)+" session="+(peers.sessionOf(id)!=null)
+                +" probesSent="+peers.probesSent()+" established="+admin.endpoint().isEstablished(group(member).id());
+    }
     @Test public void initialJoinCreatesSharedComponentsWithoutStartingFirstOrDuplicatingSync()throws Exception {
         try(var admin=new LanControllerHarness();var member=new LanControllerHarness()){
             join(admin,member);
@@ -60,7 +73,13 @@ public class InitialManagementTest {
                     admins.version(),Crypto.blake2s(admins.signedBytes()),LanControllerHarness.CLOCK.millis(),null);
             var statuses=new ArrayList<DhtWire.StoreStatus>();
             var dht=(LanDht)LanControllerHarness.field(admin.controller,"dht");
-            assertTrue(dht.publishManaged(new Contact(new DhtId(group(member).id())),record.encode(),statuses::add));
+            // 端末どうしの接続とロスターだけでは、DHT 側の探り（PING/PONG）が終わっていない。
+            // 公開の前に、その準備を待つ。
+            // Connection and roster alone do not mean the DHT-side probe (PING/PONG) has finished.
+            // Wait for that readiness before publishing.
+            LanControllerHarness.until("DHT readiness",()->dhtReady(admin,member),admin,member);
+            var destination=new Contact(new DhtId(group(member).id()));
+            assertTrue(dhtDiagnostics(admin,member),dht.publishManaged(destination,record.encode(),statuses::add));
             LanControllerHarness.until(()->!statuses.isEmpty(),admin,member);
             assertEquals(List.of(DhtWire.StoreStatus.ACCEPTED),statuses);
             try(var loaded=member.disk.load(LanControllerHarness.CLOCK)){
