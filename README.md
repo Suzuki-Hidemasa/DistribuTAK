@@ -35,6 +35,20 @@ cd plugin && ./lint-core.sh                    # 核を minSdk 23 で解析す�
 ビルドの出力・Gradle のキャッシュ・試験のベクトルは `out/` に置きます（git に入れない）。
 初回は、公開の試験ベクトルをネットから取り、固定のハッシュで照合します。
 
+### GitHub Actions の CI
+
+`main` を base にする PR と、`main` への push で、`.github/workflows/ci.yml` が動きます。
+ATAK の SDK はリポジトリにもアップロードにも入れられないため、GitHub 上で走るのは SDK を使わない確認だけです。
+
+| 確認 | GitHub 上 | 手元 |
+|---|---|---|
+| 核の試験（`core/build.sh clean test`） | 走る | 走らせる |
+| 核の Android API lint（`plugin/lint-core.sh`） | 走る | 走らせる |
+| `git diff --check`、入れてはいけないファイルの確認 | 走る | `git diff --check` |
+| プラグインのビルド・試験・lint（`plugin/build.sh`） | **走らない** | 必ず走らせる |
+
+プラグインの確認は、PR を出す人が手元で走らせ、結果を PR に書きます。
+
 ## 守ること
 
 - ATAK の SDK のコード、署名の鍵、キーストアのパスワードをリポジトリに入れません。
