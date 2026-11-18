@@ -17,6 +17,24 @@ public class NamingScreenTest {
         }
     }
     static String label(){return UUID.randomUUID().toString().replace("-","").substring(0,12);}
+    /**
+     * 2 つのノードの仮の時計を、別々の歩幅（100 ms と 137 ms）で進めながら待つ。
+     * 同じ歩幅だと、両側の 5 秒の再送と最初のパケットの送信が毎回重なり、
+     * 負荷の高い全体実行で握手が終わらないまま 90 秒の試行の予算が切れることがある（DTAK-28）。
+     * <p>
+     * Waits while advancing the two nodes' fake clocks with different step sizes (100 ms and 137 ms).
+     * With equal steps, both sides' 5-second retries and first-packet sends coincide every time,
+     * and under a heavily loaded full run the 90-second attempt budget can expire before the handshake completes (DTAK-28).
+     */
+    static void untilStaggered(LanControllerHarness.Check check,LanControllerHarness a,LanControllerHarness m)throws Exception{
+        long end=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
+        while(!check.ok()){
+            a.offset.addAndGet(100_000_000L);a.tick();m.offset.addAndGet(137_000_000L);m.tick();
+            if(System.nanoTime()>end)throw new AssertionError("renewal condition timed out");
+            Thread.sleep(5);
+        }
+        a.drain();m.drain();
+    }
     static Object reconnect(UnknownOnlineTest.Pair p)throws Exception{
         p.a.controller.namePeer(p.a.controller.ticket());p.a.drain();assertNotNull(p.a.ui.naming);
         assertNull(p.a.ui.confirmation);p.a.tick();assertNull(p.a.ui.confirmation);
@@ -38,7 +56,7 @@ public class NamingScreenTest {
             p.a.tick();assertNull(p.a.ui.confirmation);
         }
         p.m.controller.connect();p.m.drain();
-        try{LanProofRenewalTest.until(()->p.a.ui.confirmation!=null,p.a,p.m);}
+        try{untilStaggered(()->p.a.ui.confirmation!=null,p.a,p.m);}
         catch(AssertionError failure){
             var dht=(LanDht)LanControllerHarness.field(p.a.controller,"dht");
             throw new AssertionError("名前の確認を待てませんでした。確認待ち="+(LanControllerHarness.field(p.a.controller,"managementPending")!=null)
