@@ -1,11 +1,11 @@
 ---
 id: DTAK-28
 title: NamingScreenTest の再接続待ちが全体実行で時々落ちる（AdministrationButtonsTest も巻き込む）
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 08:28'
-updated_date: '2026-11-18 10:03'
+updated_date: '2026-11-18 10:16'
 labels:
   - testing
 dependencies: []
@@ -44,3 +44,9 @@ DTAK-21・24 の確認で全プラグイン試験を流したとき（5 分 31 �
 
 確認: 修正は NamingScreenTest.untilStaggered（A +100 ms・M +137 ms）。負荷下（6 プロセス）で reconnect を繰り返し、修正前は 60 回中 3・4・13 回、修正後は 60 回で 0 と 200 回で 0。全体実行は核 1,675 件・プラグイン 799 件で失敗・スキップ 0、lintCivDebug 通過、NewApi 0、git diff --check 問題なし。AC#2 の回数は『負荷下 reconnect 200 回＋全体実行 1 回』とした。
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+NamingScreenTest.reconnect の待ちを、仮の時計を別々の歩幅（A +100 ms・M +137 ms）で進める untilStaggered に替えた（PR #32、試験だけ）。原因は、同じ歩幅だと両側の再送が毎回重なり、負荷下で 90 秒の試行の予算が握手の前に切れること。負荷下で reconnect を繰り返し、修正前 60 回中 3〜13 回失敗、修正後 60 回と 200 回で 0。核 1,675 件・プラグイン 799 件で失敗・スキップ 0、lintCivDebug 通過、NewApi 0、CI の 3 ジョブ成功。
+<!-- SECTION:FINAL_SUMMARY:END -->
